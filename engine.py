@@ -36,9 +36,11 @@ _ENGINES = {}
 
 
 def stockfish(path, threads=None, hash_mb=256):
-    """One Stockfish process per path, kept open between moves: no start-up cost per
-    move, and its hash table remembers earlier positions of the game."""
-    eng = _ENGINES.get(path)
+    """One Stockfish process per path (and thread count), kept open between moves: no
+    start-up cost per move, and its hash table remembers earlier positions of the game.
+    threads=1 gets its own process, whose short searches give the same result every time."""
+    key = (path, threads)
+    eng = _ENGINES.get(key)
     if eng is not None:
         try:
             eng.ping()
@@ -47,7 +49,7 @@ def stockfish(path, threads=None, hash_mb=256):
             pass
     eng = chess.engine.SimpleEngine.popen_uci(path)
     eng.configure({"Threads": threads or max(1, (os.cpu_count() or 2) - 1), "Hash": hash_mb})
-    _ENGINES[path] = eng
+    _ENGINES[key] = eng
     return eng
 
 
@@ -86,10 +88,12 @@ def stockfish_best(path, board, seconds, depth=None, threads=None, hash_mb=256):
     }
 
 
-def stockfish_lines(path, board, seconds, depth=None, threads=None, hash_mb=256, n=None):
-    """Score the top n legal moves (default: all of them) with MultiPV. Returns (candidates, info)."""
+def stockfish_lines(path, board, seconds, depth=None, threads=None, hash_mb=256, n=None, fresh=False):
+    """Score the top n legal moves (default: all of them) with MultiPV. Returns (candidates, info).
+    fresh: clear the hash first, so a fixed-depth search on one thread always gives the same result."""
     n = n or board.legal_moves.count()
-    infos = stockfish(path, threads, hash_mb).analyse(board, _limit(seconds, depth), multipv=n)
+    infos = stockfish(path, threads, hash_mb).analyse(board, _limit(seconds, depth), multipv=n,
+                                                      game=object() if fresh else None)
     cands = []
     for info in infos:
         if not info.get("pv"):
@@ -110,6 +114,21 @@ def top_moves(board, n=3, seconds=0.1, engine_path=None, use_stockfish=True):
         return []
     cands, _ = stockfish_lines(path, board, seconds, n=min(n, board.legal_moves.count()))
     return sorted(cands, key=lambda c: -c["value"])
+
+
+def move_value(board, move, depth=10, seconds=0.1, engine_path=None, use_stockfish=True):
+    """A quick look at how good `move` is: centipawns for the side to move (mates as +-MATE).
+    Stockfish searches to `depth`; the built-in engine for `seconds`."""
+    path = find_stockfish(engine_path) if use_stockfish else None
+    if path:
+        info = stockfish(path).analyse(board, chess.engine.Limit(depth=depth), root_moves=[move])
+        return info["score"].pov(board.turn).score(mate_score=MATE)
+    after = board.copy(stack=False)
+    after.push(move)
+    if after.is_game_over():
+        return MATE if after.is_checkmate() else 0
+    r = Searcher().search(after, seconds, depth)
+    return -(r["score_cp"] if r["mate"] is None else MATE if r["mate"] > 0 else -MATE)
 
 
 # --------------------------------------------------------------------------- #
@@ -528,15 +547,15 @@ class Searcher:
             order = sorted(legal, key=scores.get, reverse=True)
             if on_iter:
                 top = order[0]
-                on_iter({"depth": depth, "pv": self.pv(board, top), **_score_fields(scores[top])})
+                on_iter({"depth": depth, "pv": self.pv(board, top), **score_fields(scores[top])})
             if time.time() - start > seconds * 0.45 or len(legal) == 1:
                 break
-        cands = [{"move": m, "pv": self.pv(board, m), "value": s, **_score_fields(s)}
+        cands = [{"move": m, "pv": self.pv(board, m), "value": s, **score_fields(s)}
                  for m, s in scores.items()]
         return cands, {"depth": done, "nodes": self.nodes, "engine": "built-in"}
 
 
-def _score_fields(s):
+def score_fields(s):
     if abs(s) > MATE - 1000:
         return {"score_cp": None, "mate": (MATE - s + 1) // 2 if s > 0 else -((MATE + s) // 2)}
     return {"score_cp": s, "mate": None}

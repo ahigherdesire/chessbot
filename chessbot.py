@@ -77,7 +77,7 @@ def print_human_index(board, r, args, last_to=None):
     move = r["move"]
     chance, lab, top = human_index.report(board, move, args.human_index, last_to,
                                           engine_path=args.engine, use_stockfish=not args.no_stockfish,
-                                          cands=r.get("cands"), engine_best=(r.get("best") or r)["move"])
+                                          cands=r.get("cands"))
     print(f"Human:  {chance:.0%} chance a {args.human_index}-rated player picks {board.san(move)} ({lab})")
     print(f"        most human: {', '.join(f'{san} {p:.0%}' for san, p in top)}")
 

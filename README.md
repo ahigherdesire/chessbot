@@ -77,7 +77,8 @@ python bot_ui.py
 
 Or double-click `Chess Bot.bat`. A small window opens in the top-right corner
 with the bot's settings: accuracy, think time, human timing, max think, the
-rating for the human index, side, and click or drag. Press **Start** and **Stop**
+rating for the human index, human moves, side, click or drag, premoves, and
+the clock. Press **Start** and **Stop**
 to run the bot. Settings apply from the next move, even while it plays.
 Below the settings it shows:
 
@@ -112,11 +113,70 @@ opponent's move changed the evaluation a lot. `--max-think` caps the longest
 wait (default 30s). After a long think, the bot checks that the board is
 unchanged before moving.
 
+### Premoves
+
+`--premove` makes the bot queue its next move while the opponent is still
+thinking. The site then plays it the moment they move. Right after each of its
+own moves, the bot decides whether a premove is worth it. It estimates how likely
+the opponent's most likely reply is:
+
+* **Only legal move**: certain.
+* **Book opening**: the share of players who answer that way in a well-known
+  position (1.e4 e5 2.Nf3 is answered by Nc6 80% of the time).
+* **The opponent is an engine** (`--opponent-engine`): how far the engine's best
+  move stands out. When several moves are almost as good, the engine may pick
+  any of them, so the likelihood is low.
+* **Otherwise**: the [human index](#human-index), using the **Human index**
+  rating. It favours clearly best moves and natural ones such as recaptures.
+
+The bot premoves when the reply is at least **70% likely**. When low on time
+(`--clock`, below `--low-time` seconds, default 20), it premoves at **40%**,
+because a wrong guess then costs less than thinking, and it thinks at most 0.3s
+a move. It never premoves more than `--premove-streak` moves in a row (default
+2) before thinking a move over again.
+
+Some examples: after 1.e4, the bot gives ...e5 about 45%, so no premove. A
+forced recapture comes out at 90-100%, so it premoves. A quiet middlegame move
+usually comes out at 45-60%, so it only premoves that when low on time. In
+simulated games, 5-20% of the bot's moves were premoves, and about half when
+low on time.
+
+```
+python auto_play.py --premove                       # premove when the reply is clear
+python auto_play.py --premove --opponent-engine     # against another engine
+python auto_play.py --premove --clock 3+2           # also premove more in a time scramble
+```
+
+The site plays a premove after **any** reply where it is legal, not only the one
+the bot predicted. So before each premove, the bot checks it against the
+opponent's 8 best replies (4 when low on time). It skips the premove if it would
+leave us more than 0.8 pawns worse off (2.5 when low on time) than the expected
+line after any of those replies. The log shows each premove
+(`premove Nxd4 if cxd4 (book, 98% of players)`) and whether it landed as
+predicted, after another reply, or was dropped because their reply made it
+illegal. When it decides not to premove, the log says why
+(`no premove: d6 is only 46% likely (most natural reply), need 70%`).
+
+The clock on screen is not read. `--clock` gives the time control, and the bot
+counts down from how long it takes per move. Start the bot before the game for
+an accurate count. Premoves are planned in about 0.3-1s, so against an engine
+that replies instantly they often come too late. In that case the bot sees the
+reply and just plays normally. Premoves that need the promotion picker are
+skipped, unless `--auto-queen` is set.
+
+In the control panel, the **Premoves** section has the mode (*off*, *on* or *vs
+engine*), **Max in a row**, the **Clock** and the low-time limit. The game
+panel shows the premove that is queued or just played, or why the bot decided
+against one. It also shows how many
+premoves landed or were dropped this game, and the bot's estimate of your clock.
+The estimate turns orange when you are low on time.
+
 ## Human index
 
 `--human-index [RATING]` prints how likely a human of that rating (default
 1500) is to play the move. It works with `chessbot.py analyze`/`fen` and with
-`auto_play.py`. It only reports: it never changes which move is played.
+`auto_play.py`. On its own it only reports. To make the bot play only human
+moves, see [Human mode](#human-mode).
 
 ```
 python chessbot.py fen "<FEN>" --human-index 1200
@@ -128,13 +188,41 @@ Labels: **very human** (over 50%), **natural** (10-50%), **unusual** (3-10%), an
 below 3% either **engine-like** (a strong move few people find) or **rare
 mistake** (a bad move few people make).
 
-It is an estimate, not real data. A move's chance falls with how much worse it
-is than the best move (stronger players give away less), and with its rank among
-the engine's choices. It rises for moves humans find natural (captures,
-recaptures, checks, castling, saving an attacked piece), and falls for moves
-they overlook (retreats, long quiet moves, early king walks). It is roughly
-tuned so 1.e4 gets about 40% at the start and engine-best moves land around
-50-60%. A model trained on real games, such as Maia, would be more accurate.
+It is an estimate, not real data. Moves are judged the way a player of that
+rating sees them: with a search only as deep as they calculate (2 plies at 1000,
+4 at 1500, 6 at 2000, 8 at 2500). So a move that is only good because of a deep
+line looks bad and gets a low chance, the way people miss it. A move's chance
+falls with how much worse it looks than the best-looking move (stronger players
+give away less), and with its rank. It rises for moves humans find natural
+(captures, recaptures, checks, castling, saving an attacked piece), and falls
+for moves they overlook (retreats, long quiet moves, early king walks). 1.e4
+gets about 40% at the start. A model trained on real games, such as Maia, would
+be more accurate.
+
+### Human mode
+
+`--human-moves X` makes the bot play only moves a human of the `--human-index`
+rating (default 1500) would pick at least X% of the time. Among those moves, it
+plays the engine's choice (`--accuracy` still applies). It never plays a move
+only an engine finds. If no move reaches X%, it plays the most human move.
+
+```
+python auto_play.py --human-moves 20 --human-index 1500
+```
+
+In the control panel, set **Human moves** to X (0 turns it off). It uses the
+**Human index** rating. In simulated games at 1500, the move differed from the
+engine's choice this often, usually costing 0.2-0.5 pawns:
+
+| Human moves | moves changed |
+|---:|---:|
+| 10% | about 1 in 8 |
+| 20% | about 1 in 3 |
+| 35% | about 1 in 2 |
+
+The best move usually gets 30-60%, so values above 50% mean "always play the
+single most human move". Premoves follow human mode too. The log shows what it
+did (`human mode: 2 moves 20%+ human, skipped the engine's e5`).
 
 ## Other board or piece themes
 

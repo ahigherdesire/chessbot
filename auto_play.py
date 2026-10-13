@@ -9,6 +9,7 @@ that `python board_coords.py map` prints (monitor offset included).
   python auto_play.py --once --turn-now    # play one move right now
   python auto_play.py --dry-run            # think and hover the squares, never click
   python auto_play.py --human blitz        # take human-like time: fast on easy moves, slow on hard ones
+  python auto_play.py --premove --clock 3+2   # premove predictable replies, and everything when low on time
 
 Move the mouse into a screen corner (or press Ctrl+C) to stop.
 """
@@ -24,6 +25,7 @@ import board_coords as bc
 import board_reader as br
 import engine
 import human_index
+import premove
 
 START = chess.Board().board_fen()
 PROMO_ORDER = [chess.QUEEN, chess.KNIGHT, chess.ROOK, chess.BISHOP]  # chess.com and lichess pickers
@@ -44,6 +46,8 @@ def play_move(bm, move, drag=False, delay=0.15, jitter=3, auto_queen=False):
 
 
 PACES = {"bullet": 0.25, "blitz": 0.5, "rapid": 1.0, "classical": 2.0}
+PREMOVE_GRACE = 1.5     # seconds to wait for the site to play our premove once their reply is on screen
+LOW_TIME_THINK = 0.3    # engine seconds per move when low on time
 
 
 def think_time(board, top, opp_move=None, prev_eval=None, moves=0, pace=1.0, rng=random):
@@ -103,18 +107,21 @@ def park(bm):
 
 
 class AutoPlayer:
-    def __init__(self, args, log=print, on_move=None, stop=None):
+    def __init__(self, args, log=print, on_move=None, stop=None, on_premove=None):
         """log: where status text goes. on_move: called with a dict after each move we play.
-        stop: a threading.Event that ends run() (and any wait) when set."""
+        stop: a threading.Event that ends run() (and any wait) when set.
+        on_premove: called with (event, text) when a premove is "queued", "played" or "dropped"."""
         self.args = args
         self.log = log
         self.on_move = on_move
+        self.on_premove = on_premove or (lambda event, text: None)
         self.stop = stop or threading.Event()
         self.templates = br.load_templates(args.templates)
         self.grid = None              # board position on the screenshot, found once and reused
         self.white_bottom = None if args.side is None else args.side == "white"
         self.warned = None
         self.no_board = False
+        self.clock = None             # our estimated time left, when --clock is set
         self.new_game()
 
     def new_game(self):
@@ -127,6 +134,10 @@ class AutoPlayer:
         self.moves = 0                 # moves we have played this game
         self.opp_move = None           # the opponent's last move, when we know it
         self.last_eval = None          # our eval after our last move (centipawns)
+        self.premove = None            # the premove queued on the site, waiting for their reply
+        self.premove_streak = 0        # premoves played in a row since we last thought for real
+        if self.clock:
+            self.clock.reset()
 
     # ---- vision --------------------------------------------------------- #
     def read(self):
@@ -214,6 +225,8 @@ class AutoPlayer:
 
     def step(self):
         """Look at the board once; play a move if it is our turn. Returns True if a move was played."""
+        self.sync_clock()
+        t_look = time.time()
         got = self.read_stable()
         if got is None:
             return False
@@ -223,6 +236,15 @@ class AutoPlayer:
             self.new_game()
             if not self.white_bottom:
                 self.game, self.expected = chess.Board(), START   # playing black: wait for white's first move
+        if self.premove:
+            state = self.check_premove(placement, bm)
+            if state == "queued":
+                return False
+            if state == "played":
+                return True
+            if state == "gone":
+                self.on_premove("dropped", f"{self.premove['san']} dropped: they played something else")
+                self.premove = None
         board = self.decide(info)
         if board is None:
             return False
@@ -240,14 +262,15 @@ class AutoPlayer:
         wait, seconds = 0.0, self.args.time
         if retry:
             self.log("   move did not register, clicking it again")
+        elif self.low_on_time():
+            seconds = min(seconds, LOW_TIME_THINK)
         elif self.args.human:
             top = engine.top_moves(board, 3, 0.1, self.args.engine, not self.args.no_stockfish)
             wait, why = think_time(board, top, self.opp_move, self.last_eval, self.moves, PACES[self.args.human])
             wait = min(wait, self.args.max_think)
             seconds = min(seconds, max(0.1, wait * 0.8))   # quick moves must not wait on the engine
             self.log(f"   thinking {wait:.1f}s ({why})")
-        r = engine.best_move(board, seconds=seconds, engine_path=self.args.engine,
-                             use_stockfish=not self.args.no_stockfish, accuracy=self.args.accuracy)
+        r = human_index.choose_move(board, self.args, seconds, self.opp_move.to_square if self.opp_move else None)
         if wait > 0:
             if self.stop.wait(max(0.0, t0 + wait - time.time())):
                 return False
@@ -257,14 +280,14 @@ class AutoPlayer:
                 if again is None or again[0]["board"].board_fen() != placement:
                     self.log("   position changed while thinking - not moving")
                     return False
-        self.last_eval = _value(r)
         move = r["move"]
-        san = board.san(move)
-        if placement != self.played_from:
+        if not retry:
             self.moves += 1
-        self.log(f"{self.moves}{'.' if me == chess.WHITE else '...'} {san:<7} "
+        self.log(f"{self.moves}{'.' if me == chess.WHITE else '...'} {board.san(move):<7} "
               f"{chess.square_name(move.from_square)}{bm.center(chess.square_name(move.from_square))} -> "
               f"{chess.square_name(move.to_square)}{bm.center(chess.square_name(move.to_square))}")
+        if "allowed" in r:
+            self.log(f"   human mode: {self.human_mode_note(board, r)}")
 
         if self.args.dry_run:
             bm.hover(chess.square_name(move.from_square), duration=0.2)
@@ -274,27 +297,151 @@ class AutoPlayer:
             play_move(bm, move, drag=self.args.drag, delay=self.args.delay,
                       jitter=self.args.jitter, auto_queen=self.args.auto_queen)
         park(bm)
+        if self.clock:
+            if retry:   # the clock kept running since the click that did not register
+                self.clock.spend(time.time() - self.played_at, increment=False)
+            else:       # it started when their move landed, about one screenshot before we saw it
+                self.clock.spend(time.time() - t_look + self.args.poll)
+        self.after_move(board, r, wait)
+        self.played_from = placement
+        if not retry:
+            self.premove_streak = 0
+            self.queue_premove(bm)
+        return True
+
+    def after_move(self, board, r, think, premoved=False):
+        """Report our move r["move"] from `board` and remember the game after it."""
+        move, me = r["move"], board.turn
         chance = lab = None
-        if self.args.human_index is not None:
+        if "human" in r:               # human mode already worked it out
+            chance, lab = r["human"], human_index.label(r["human"], r["loss_cp"])
+        elif self.args.human_index is not None:
             last_to = self.opp_move.to_square if self.opp_move else None
-            chance, lab, _ = human_index.report(board, move, self.args.human_index, last_to, seconds=0.2,
+            chance, lab, _ = human_index.report(board, move, self.args.human_index, last_to,
                                                 engine_path=self.args.engine, use_stockfish=not self.args.no_stockfish,
-                                                cands=r.get("cands"), engine_best=(r.get("best") or r)["move"])
+                                                cands=r.get("cands"))
+        if chance is not None:
             self.log(f"   human index: {chance:.0%} ({lab})")
         if self.on_move:
             # eval from white's point of view, for an eval bar
             sign = 1 if me == chess.WHITE else -1
             self.on_move({
-                "number": self.moves, "san": san, "color": "white" if me == chess.WHITE else "black",
+                "number": self.moves, "san": board.san(move), "color": "white" if me == chess.WHITE else "black",
                 "eval_cp": None if r.get("score_cp") is None else sign * r["score_cp"],
                 "mate": None if r.get("mate") is None else sign * r["mate"],
-                "human": chance, "human_label": lab, "think": wait,
+                "human": chance, "human_label": lab, "think": think, "premove": premoved,
+                "clock": self.clock.left if self.clock else None,
             })
+        self.last_eval = _value(r)
+        self.premove = None
         self.game_before = board
         self.game = board.copy()
         self.game.push(move)
-        self.played_from, self.expected, self.played_at = placement, self.game.board_fen(), time.time()
-        return True
+        self.expected, self.played_at = self.game.board_fen(), time.time()
+
+    def human_mode_note(self, board, r):
+        """What human mode did this move, for the log."""
+        x = self.args.human_moves
+        if r["human"] < x / 100:
+            return f"no move is {x:g}%+ human, played the most human one"
+        note = f"{r['allowed']} move{'s' if r['allowed'] > 1 else ''} {x:g}%+ human"
+        if r["best"]["move"] != r["move"]:
+            note += f", skipped the engine's {board.san(r['best']['move'])}"
+        return note
+
+    # ---- premoves ------------------------------------------------------- #
+    def sync_clock(self):
+        """Follow the --clock setting (the control panel can change it mid-game)."""
+        spec = self.args.clock or None
+        if spec != (self.clock.spec if self.clock else None):
+            self.clock = premove.Clock(spec) if spec else None
+
+    def low_on_time(self):
+        return self.clock is not None and self.clock.left < self.args.low_time
+
+    def queue_premove(self, bm):
+        """Right after our move: if their reply is predictable, click our answer to it now."""
+        if not self.args.premove or self.game is None:
+            return
+        low = self.low_on_time()
+        if self.premove_streak >= self.args.premove_streak:
+            self.on_premove("skipped", f"No premove: {self.premove_streak} in a row, thinking this one over")
+            return
+        pm, why_not = premove.plan(self.game, self.args, low)
+        if pm is None:
+            if why_not:
+                self.log(f"   no premove: {why_not}")
+                self.on_premove("skipped", f"No premove: {why_not}")
+            return
+        if self.stop.is_set():
+            return
+        # planning took a moment: if they have already moved, the click would not be a premove
+        again = self.read()
+        if again is None or again[0]["board"].board_fen() != self.expected:
+            return
+        after = self.game.copy()
+        after.push(pm["reply"])
+        san, reply = after.san(pm["move"]), self.game.san(pm["reply"])
+        self.log(f"   premove {san} if {reply} ({pm['why']})")
+        frm, to = chess.square_name(pm["move"].from_square), chess.square_name(pm["move"].to_square)
+        if self.args.dry_run:
+            bm.hover(frm, duration=0.2)
+            time.sleep(0.3)
+            bm.hover(to, duration=0.2)
+            park(bm)
+            return                     # nothing was queued on the site
+        play_move(bm, pm["move"], drag=self.args.drag, delay=self.args.delay,
+                  jitter=self.args.jitter, auto_queen=self.args.auto_queen)
+        park(bm)
+        self.premove = {**pm, "san": san, "shown": premove.shown(self.game, pm["move"]), "since": None}
+        self.on_premove("queued", f"{san} if {reply} ({pm['why']})")
+
+    def check_premove(self, placement, bm):
+        """Follow the queued premove. Returns "queued" (still waiting for their reply),
+        "played" (the site played it after their reply), "gone" (their reply made it
+        illegal, so the site dropped it: our turn as usual) or "unknown"."""
+        pm = self.premove
+        if placement in (self.expected, pm["shown"]):
+            return "queued"
+        for reply in self.game.legal_moves:
+            after = self.game.copy()
+            after.push(reply)
+            if after.board_fen() == placement:
+                if pm["move"] not in after.legal_moves:
+                    return "gone"
+                # their move is on screen but ours is not yet: give the site a moment
+                pm["since"] = pm["since"] or time.time()
+                return "queued" if time.time() - pm["since"] < PREMOVE_GRACE else "gone"
+            if pm["move"] in after.legal_moves:
+                after.push(pm["move"])
+                if after.board_fen() == placement:
+                    after.pop()
+                    self.premove_played(after, reply, bm)
+                    return "played"
+        return "unknown"
+
+    def premove_played(self, board, reply, bm):
+        """The site played our premove after their `reply`; `board` is the position after that reply."""
+        pm = self.premove
+        move = pm["move"]
+        self.log(f"   opponent: {self.game.san(reply)}")
+        self.opp_move = reply
+        if reply == pm["reply"]:
+            r, note = pm["result"], "as predicted"
+        else:
+            # a surprise, but the premove was checked to be fine after their likely replies
+            value = engine.move_value(board, move, engine_path=self.args.engine,
+                                      use_stockfish=not self.args.no_stockfish)
+            r, note = {"move": move, **engine.score_fields(value)}, "after another reply"
+        self.moves += 1
+        self.log(f"{self.moves}{'.' if board.turn == chess.WHITE else '...'} {board.san(move):<7} premove, {note}")
+        if self.clock:
+            self.clock.spend(0.1)      # sites charge a premove about 0.1s
+        self.premove_streak += 1
+        self.on_premove("played", f"{board.san(move)} played, {note}")
+        self.after_move(board, r, 0.0, premoved=True)
+        self.played_from = board.board_fen()
+        self.queue_premove(bm)         # keep premoving while their replies stay predictable
 
     def run(self):
         self.log("Watching the board. Move the mouse into a screen corner to stop.")
@@ -335,7 +482,22 @@ def build_parser():
                         "(pace: bullet, blitz, rapid (default), classical)")
     p.add_argument("--human-index", nargs="?", type=int, const=1500, metavar="RATING",
                    help="after each move, print the chance a human of this rating (default 1500) plays it")
+    p.add_argument("--human-moves", type=float, default=0, metavar="PERCENT",
+                   help="human mode: only play moves a human of the --human-index rating (default 1500) "
+                        "picks at least this often, e.g. 10 (default 0 = off)")
     p.add_argument("--max-think", type=float, default=30.0, help="longest human-like think in seconds")
+    p.add_argument("--premove", action="store_true",
+                   help="premove when their reply is at least 70%% likely (only move, book opening, clear "
+                        "best or natural move such as a recapture), or 40%% likely when low on time (--clock)")
+    p.add_argument("--opponent-engine", action="store_true",
+                   help="the opponent is an engine: judge its reply by how far its best move stands out")
+    p.add_argument("--clock", metavar="MIN+INC",
+                   help="time control such as 3+2, to track our time left: when low, think fast and premove more")
+    p.add_argument("--low-time", type=float, default=20.0, help="seconds left that count as low on time (default 20)")
+    p.add_argument("--premove-streak", type=int, default=2, metavar="N",
+                   help="most premoves in a row before thinking over a move again (default 2)")
+    p.add_argument("--premove-time", type=float, default=0.1,
+                   help="engine seconds for predicting their reply (default 0.1)")
     p.add_argument("--templates", default=br.DEFAULT_TEMPLATES)
     return p
 
@@ -352,6 +514,8 @@ def main():
 
     if args.turn_now and not args.once:
         p.error("--turn-now only works with --once")
+    if args.clock and not premove.Clock.valid(args.clock):
+        p.error("--clock takes minutes+increment, like 3+2 or 1")
     bot = AutoPlayer(args)
     if args.turn_now:
         bot.decide = lambda info: _force_turn(bot, info)

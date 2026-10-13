@@ -1,10 +1,13 @@
 """Human index: an estimate of how likely a human of a given rating is to play each move.
 
-It is a model, not data: a move's chance falls with how much worse it is than the
-best move (stronger players give away less) and with its rank among the engine's
-choices (people mostly pick from the first few). It is nudged by what humans find
-natural (captures, recaptures, checks, castling, moving an attacked piece) or tend
-to overlook (backward retreats, long quiet moves, early king walks).
+It is a model, not data. Moves are judged the way a player of that rating sees
+them: by a search only as deep as they calculate (search_depth), so a move that is
+only good because of a deep line looks bad and gets a low chance. A move's chance
+then falls with how much worse it looks than the best-looking move (stronger
+players give away less) and with its rank (people mostly pick from the first few).
+It is nudged by what humans find natural (captures, recaptures, checks, castling,
+moving an attacked piece) or tend to overlook (backward retreats, long quiet moves,
+early king walks).
 """
 import math
 
@@ -26,6 +29,27 @@ def score_all(board, seconds=0.3, engine_path=None, use_stockfish=True):
     if path:
         return engine.stockfish_lines(path, board, seconds)[0]
     return engine.Searcher().score_root(board, seconds, 64, None, engine.INF)[0]
+
+
+def search_depth(rating):
+    """Plies a player of this rating effectively looks ahead: 1000 -> 2, 1500 -> 4, 2000 -> 6, 2500 -> 8."""
+    return max(1, min(12, round(2 + (rating - 1000) / 250)))
+
+
+def looks(board, rating=1500, engine_path=None, use_stockfish=True):
+    """How good every legal move looks to a player of `rating`: scores from a search
+    only search_depth(rating) plies deep."""
+    depth = search_depth(rating)
+    path = engine.find_stockfish(engine_path) if use_stockfish else None
+    if path:
+        # one thread and a clear hash: otherwise a search this short gives a different answer each time
+        return engine.stockfish_lines(path, board, None, depth=depth, threads=1, hash_mb=16, fresh=True)[0]
+    return engine.Searcher().score_root(board, 5.0, depth, None, engine.INF)[0]
+
+
+def chances(board, rating=1500, last_to=None, engine_path=None, use_stockfish=True):
+    """{move: chance} that a player of `rating` picks each move. Chances sum to 1."""
+    return dict(human_odds(board, looks(board, rating, engine_path, use_stockfish), rating, last_to))
 
 
 def naturalness(board, move, last_to=None):
@@ -56,7 +80,8 @@ def naturalness(board, move, last_to=None):
 
 
 def human_odds(board, cands, rating=1500, last_to=None):
-    """[(move, chance)] for every scored move, most human first. Chances sum to 1."""
+    """[(move, chance)] for every scored move, most human first. Chances sum to 1.
+    cands: scored moves; looks() gives a human's view, engine scores a perfect player's."""
     if not cands:
         return []
     cands = sorted(cands, key=lambda c: -c["value"])
@@ -71,6 +96,34 @@ def human_odds(board, cands, rating=1500, last_to=None):
     return sorted(((c["move"], w / total) for c, w in zip(cands, weights)), key=lambda x: -x[1])
 
 
+def human_move(board, rating=1500, min_chance=0.1, seconds=1.0, last_to=None, accuracy=100,
+               engine_path=None, use_stockfish=True):
+    """Human mode: the engine's choice among only the moves a player of `rating` would
+    pick at least `min_chance` of the time, so it never plays a move only an engine
+    finds. When no move is that human, the most human move is played. Returns an
+    engine.best_move()-style result, plus "human" (the chance of the chosen move) and
+    "allowed" (how many moves passed)."""
+    cands = score_all(board, seconds, engine_path, use_stockfish)
+    odds = chances(board, rating, last_to, engine_path, use_stockfish)
+    allowed = [c for c in cands if odds.get(c["move"], 0) >= min_chance] \
+        or [max(cands, key=lambda c: odds.get(c["move"], 0))]
+    chosen, _ = engine.pick_move(allowed, accuracy)   # --accuracy still applies among them
+    best = max(cands, key=lambda c: c["value"])
+    return {**chosen, "best": best, "loss_cp": best["value"] - chosen["value"], "cands": cands,
+            "human": odds.get(chosen["move"], 0), "allowed": len(allowed), "accuracy": accuracy}
+
+
+def choose_move(board, args, seconds, last_to=None):
+    """The move to play under the bot's settings (an argparse namespace like auto_play's):
+    human mode when args.human_moves is set, otherwise the engine with --accuracy."""
+    use_sf = not args.no_stockfish
+    if getattr(args, "human_moves", 0):
+        return human_move(board, args.human_index or 1500, args.human_moves / 100, seconds, last_to,
+                          args.accuracy, args.engine, use_sf)
+    return engine.best_move(board, seconds=seconds, engine_path=args.engine, use_stockfish=use_sf,
+                            accuracy=args.accuracy)
+
+
 def label(chance, loss_cp=0):
     """Words for a chance. loss_cp: how much worse than the best move it is."""
     if chance > 0.50:
@@ -83,19 +136,16 @@ def label(chance, loss_cp=0):
     return "engine-like" if loss_cp <= 30 else "rare mistake"
 
 
-def report(board, move, rating=1500, last_to=None, seconds=0.3, engine_path=None, use_stockfish=True, top=3,
-           cands=None, engine_best=None):
+def report(board, move, rating=1500, last_to=None, engine_path=None, use_stockfish=True, top=3, cands=None):
     """(chance of `move`, its label, the `top` most human moves as [(san, chance)]).
 
-    cands: scores for every move if you already have them (skips a search).
-    engine_best: the best move from a deeper search; the quick scores are noisy
-    between near-equal moves, so that move is treated as the best one."""
-    cands = cands or score_all(board, seconds, engine_path, use_stockfish)
-    if engine_best is not None:
-        top_value = max(c["value"] for c in cands)
-        cands = [dict(c, value=top_value + 1) if c["move"] == engine_best else c for c in cands]
-    odds = human_odds(board, cands, rating, last_to)
+    cands: deep engine scores for every move, if you already have them. They only
+    decide the label of a rare move (engine-like or a mistake); without them the
+    human's own view is used."""
+    seen = looks(board, rating, engine_path, use_stockfish)
+    odds = human_odds(board, seen, rating, last_to)
     chance = next((p for m, p in odds if m == move), 0.0)
+    cands = cands or seen
     best = max(c["value"] for c in cands)
     loss = best - next((c["value"] for c in cands if c["move"] == move), best)
     return chance, label(chance, loss), [(board.san(m), p) for m, p in odds[:top]]
