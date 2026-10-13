@@ -22,6 +22,28 @@ GOOD, OK, WARN, BAD = "#5fb760", "#c9b84a", "#d98c3f", "#d0544b"
 TIMING = ["off", "bullet", "blitz", "rapid", "classical"]
 PREMOVE = ["off", "on", "vs engine"]
 LABEL_CHARS = 13   # setting names get the same width in every section, so the sections line up
+GRAPH_W, GRAPH_H = 300, 130
+PAD_L, PAD_R, PAD_T, PAD_B = 26, 6, 6, 6   # room around the plot for the axis labels
+GRAPH_MOVES = 20   # the graphs' x axis spans at least this many of our moves
+HOVER_HINT = "Point at a graph to see that move"
+
+
+def win_chance(value):
+    """Win chance in % for the side with this value (centipawns, mates as +-engine.MATE)."""
+    v = max(-1000, min(1000, value))
+    return 50 + 50 * (2 / (1 + math.exp(-0.00368208 * v)) - 1)
+
+
+def move_accuracy(best, played):
+    """Lichess's accuracy for one move: 100 for the best move, less the more win chance it gives away."""
+    lost = max(0.0, win_chance(best) - win_chance(played))
+    return max(0.0, min(100.0, 103.1668 * math.exp(-0.04354 * lost) - 3.1669))
+
+
+def accuracy_kind(acc):
+    """Lichess's names: giving away 5 / 10 / 15 points of win chance is an inaccuracy / mistake / blunder."""
+    return ("good", GOOD) if acc >= 80 else ("inaccuracy", OK) if acc >= 64 else \
+        ("mistake", WARN) if acc >= 50 else ("blunder", BAD)
 
 
 def white_share(cp, mate):
@@ -51,23 +73,24 @@ class BotUI:
 
         root.title("Chess Bot")
         root.configure(bg=BG)
-        root.resizable(False, False)
         root.protocol("WM_DELETE_WINDOW", self.close)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
         self._style()
 
-        main = ttk.Frame(root, padding=10)
-        main.grid(sticky="nsew")
-        self._settings(main)
-        self._premove_settings(main)
-        self._controls(main)
-        self._game(main)
-        self._log(main)
+        self.main = ttk.Frame(root, padding=10)
+        self.main.grid(sticky="nsew")
+        self._settings(self.main)
+        self._premove_settings(self.main)
+        self._controls(self.main)
+        self._game(self.main)
+        self._side(self.main)
+        self.reset_game_stats()
         self.apply()
 
         self.on_top.set(True)
         self.toggle_top()
-        root.update_idletasks()
-        root.geometry(f"+{root.winfo_screenwidth() - root.winfo_width() - 20}+40")  # top-right corner
+        self.layout(top=40)
         self.root.after(100, self.pump)
 
     # ---- layout --------------------------------------------------------- #
@@ -144,6 +167,9 @@ class BotUI:
         self.on_top = tk.BooleanVar()
         ttk.Checkbutton(checks, text="Keep on top", variable=self.on_top,
                         command=self.toggle_top).pack(side="left", padx=(12, 0))
+        self.show_graphs = tk.BooleanVar(value=True)
+        ttk.Checkbutton(checks, text="Graphs", variable=self.show_graphs,
+                        command=self.layout).pack(side="left", padx=(12, 0))
 
         for var in (self.accuracy, self.think, self.timing, self.max_think, self.rating, self.human_moves,
                     self.move_with, self.dry_run):
@@ -238,13 +264,62 @@ class BotUI:
         self.pm_lbl.grid(row=7, column=0, columnspan=2, sticky="w")
         self.white_bottom = True
         self.draw_bar(0.5)
-        self.reset_game_stats()
 
-    def _log(self, parent):
-        ttk.Label(parent, text="LOG", style="Head.TLabel").grid(row=8, column=0, sticky="w")
+    def _side(self, parent):
+        """Right-hand column: the eval and accuracy graphs, then the log. Placed by layout()."""
+        f = self.graph_col = ttk.Frame(parent)
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure((1, 3), weight=2)       # a taller window grows the graphs and the log
+        f.rowconfigure(7, weight=1)
+        ttk.Label(f, text="EVAL", style="Head.TLabel").grid(row=0, column=0, sticky="w")
+        self.eval_graph = self._graph(f, 1)
+        head = ttk.Frame(f)
+        head.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(head, text="ACCURACY", style="Head.TLabel").pack(side="left")
+        self.acc_avg = ttk.Label(head, text="", style="Head.TLabel")
+        self.acc_avg.pack(side="right")
+        self.acc_graph = self._graph(f, 3)
+        self.graph_info = ttk.Label(f, text=HOVER_HINT, foreground=MUTED)
+        self.graph_info.grid(row=4, column=0, sticky="w", pady=(4, 0))
+        # the log belongs to the main frame: layout() puts it in this column or under the game
+        self.log_head = ttk.Label(parent, text="LOG", style="Head.TLabel")
         self.log_box = tk.Text(parent, width=48, height=7, bg=PANEL, fg=MUTED, relief="flat", wrap="word",
                                font=("Consolas", 8), state="disabled", padx=6, pady=4)
-        self.log_box.grid(row=9, column=0, sticky="ew", pady=(2, 0))
+
+    def _graph(self, parent, row):
+        c = tk.Canvas(parent, width=GRAPH_W, height=GRAPH_H, bg=PANEL, highlightthickness=0)
+        c.grid(row=row, column=0, sticky="nsew", pady=(2, 0))
+        c.bind("<Configure>", lambda _: self.draw_graphs())
+        c.bind("<Motion>", self.hover)
+        c.bind("<Leave>", self.unhover)
+        return c
+
+    def layout(self, top=None):
+        """Graphs on: a second column with the graphs and the log. Off: one narrow column,
+        the log under the game. Either way the window fits its contents again, at the
+        right edge of the screen; the graph column (or the log) takes any resizing."""
+        m, graphs = self.main, self.show_graphs.get()
+        if graphs:
+            self.graph_col.grid(row=0, column=1, rowspan=9, sticky="nsew", padx=(16, 0))
+            self.log_head.grid(in_=self.graph_col, row=6, column=0, sticky="w", pady=(8, 0))
+            self.log_box.grid(in_=self.graph_col, row=7, column=0, sticky="nsew", pady=(2, 0))
+        else:
+            self.graph_col.grid_remove()
+            self.log_head.grid(in_=m, row=8, column=0, sticky="w")
+            self.log_box.grid(in_=m, row=9, column=0, sticky="nsew", pady=(2, 0))
+        m.columnconfigure(0, weight=0 if graphs else 1)
+        m.columnconfigure(1, weight=1 if graphs else 0)
+        m.rowconfigure(8, weight=1 if graphs else 0)   # empty on the left: the game panel stays put
+        m.rowconfigure(9, weight=0 if graphs else 1)
+        root = self.root
+        root.minsize(1, 1)
+        root.geometry("")                      # drop any size the user dragged to
+        root.update_idletasks()
+        w, h = root.winfo_reqwidth(), root.winfo_reqheight()
+        # the graph column may shrink to about half; nothing else may be cut off
+        root.minsize(w - (self.graph_col.winfo_reqwidth() // 2 if graphs else 0), h)
+        y = top if top is not None else root.winfo_y()
+        root.geometry(f"{w}x{h}+{root.winfo_screenwidth() - w - 20}+{y}")
 
     # ---- settings -> bot ------------------------------------------------ #
     def apply(self):
@@ -321,6 +396,7 @@ class BotUI:
                     if "Playing" in data:
                         self.set_status(data.strip().split(". ")[-1], GOOD)
                         self.white_bottom = "white" in data.split("Playing")[-1]
+                        self.draw_graphs()
                     elif data.startswith("New game"):
                         self.white_bottom = "white" in data
                         self.reset_game_stats()
@@ -358,7 +434,17 @@ class BotUI:
             self.hi_bar.delete("all")
             self.hi_bar.create_rectangle(0, 0, max(2, 120 * p), 10, fill=color, width=0)
             self.hi_lbl.config(text=f"{p:.0%}  {m['human_label']}", foreground=color)
-        self.our_moves += 1
+        point = {"number": m["number"], "label": f"{m['number']}{dots} {m['san']}", "share": share,
+                 "eval": eval_text(m["eval_cp"], m["mate"]), "premove": m.get("premove"),
+                 "acc": None if m.get("value") is None else move_accuracy(m["best_value"], m["value"])}
+        if self.history and m["number"] < self.history[-1]["number"]:
+            self.history.clear()                   # a new game started
+        if self.history and m["number"] == self.history[-1]["number"]:
+            self.history[-1] = point               # the same move clicked again
+        else:
+            self.history.append(point)
+            self.our_moves += 1
+        self.draw_graphs()
         self.show_premove_count()
         if m.get("clock") is not None:
             low = m["clock"] < self.args.low_time
@@ -372,6 +458,8 @@ class BotUI:
         self.pm_stats = {"played": 0, "dropped": 0}
         self.show_premove_count()
         self.clock_lbl.config(text="")
+        self.history = []              # one point per move we played: eval after it, its accuracy
+        self.draw_graphs()
 
     def show_premove(self, event, text):
         if event == "queued":
@@ -403,6 +491,96 @@ class BotUI:
             c.create_rectangle(0, white_h, w, h, fill=BLACK_BAR, width=0)
         c.create_line(0, h / 2, w, h / 2, fill="#888888")
         c.create_rectangle(0, 0, w - 1, h - 1, outline="#55575e")
+
+    # ---- graphs --------------------------------------------------------- #
+    @staticmethod
+    def size(c):
+        """A canvas's size; the requested one until it is on screen."""
+        w, h = c.winfo_width(), c.winfo_height()
+        return (w, h) if w > 1 else (int(c["width"]), int(c["height"]))
+
+    def gx(self, i):
+        """x of point i on both graphs: 0 = the start position, k = after our k-th move."""
+        w = self.size(self.eval_graph)[0]
+        return PAD_L + (w - PAD_L - PAD_R) * i / max(len(self.history), GRAPH_MOVES)
+
+    def draw_graphs(self):
+        self.draw_eval_graph()
+        self.draw_accuracy_graph()
+
+    def draw_eval_graph(self):
+        """White's win chance after each of our moves, white below the line when we are white
+        (like the eval bar)."""
+        c = self.eval_graph
+        w, h = self.size(c)
+        top, bot, right = PAD_T, h - PAD_B, w - PAD_R
+        c.delete("all")
+
+        def y(share):
+            return bot - (bot - top) * (share if self.white_bottom else 1 - share)
+
+        c.create_rectangle(PAD_L, top, right, bot, fill=BLACK_BAR, width=0)
+        pts = [(self.gx(0), y(0.5))] + [(self.gx(i), y(p["share"])) for i, p in enumerate(self.history, 1)]
+        if len(pts) > 1:
+            base = bot if self.white_bottom else top
+            c.create_polygon([(pts[0][0], base)] + pts + [(pts[-1][0], base)], fill=WHITE_BAR, outline="")
+        for share, text in ((0.75, "+3"), (0.5, "0"), (0.25, "-3")):   # 75% to win is about +3
+            c.create_line(PAD_L, y(share), right, y(share), fill="#6b6d73", dash=(2, 3))
+            c.create_text(PAD_L - 5, y(share), text=text, anchor="e", fill=MUTED, font=("Segoe UI", 7))
+        for (x, py), p in zip(pts[1:], self.history):
+            if p["premove"]:
+                c.create_oval(x - 2, py - 2, x + 2, py + 2, fill=OK, width=0)
+
+    def draw_accuracy_graph(self):
+        """A bar per move (coloured like lichess: good, inaccuracy, mistake, blunder) and the
+        running average as a line."""
+        c = self.acc_graph
+        w, h = self.size(c)
+        top, bot, right = PAD_T, h - PAD_B, w - PAD_R
+        c.delete("all")
+
+        def y(acc):
+            return bot - (bot - top) * acc / 100
+
+        c.create_rectangle(PAD_L, top, right, bot, fill=BG, width=0)
+        for acc in (100, 50, 0):
+            c.create_line(PAD_L, y(acc), right, y(acc), fill="#45474d", dash=(2, 3))
+            c.create_text(PAD_L - 5, y(acc), text=str(acc), anchor="e", fill=MUTED, font=("Segoe UI", 7))
+        half = max(1.0, (self.gx(1) - self.gx(0)) * 0.3)
+        rated, line = [], []
+        for i, p in enumerate(self.history, 1):
+            if p["acc"] is None:
+                continue
+            x = self.gx(i)
+            c.create_rectangle(x - half, y(p["acc"]), x + half, bot, fill=accuracy_kind(p["acc"])[1], width=0)
+            rated.append(p["acc"])
+            line.append((x, y(sum(rated) / len(rated))))
+        if len(line) > 1:
+            c.create_line(line, fill=TEXT, width=1.5)
+        self.acc_avg.config(text=f"game average {sum(rated) / len(rated):.0f}%" if rated else "")
+
+    def hover(self, event):
+        """Show the move under the mouse, with a line across both graphs."""
+        step = self.gx(1) - self.gx(0)
+        i = max(0, min(len(self.history), round((event.x - PAD_L) / step)))
+        for c in (self.eval_graph, self.acc_graph):
+            c.delete("cursor")
+            c.create_line(self.gx(i), PAD_T, self.gx(i), self.size(c)[1] - PAD_B, fill=MUTED, tags="cursor")
+        if i == 0:
+            self.graph_info.config(text="Start position   0.0", foreground=TEXT)
+            return
+        p = self.history[i - 1]
+        text = f"{p['label']}   {p['eval']}"
+        color = TEXT
+        if p["acc"] is not None:
+            kind, color = accuracy_kind(p["acc"])
+            text += f"   accuracy {p['acc']:.0f}% ({kind})"
+        self.graph_info.config(text=text + ("   premove" if p["premove"] else ""), foreground=color)
+
+    def unhover(self, _event):
+        for c in (self.eval_graph, self.acc_graph):
+            c.delete("cursor")
+        self.graph_info.config(text=HOVER_HINT, foreground=MUTED)
 
     def set_status(self, text, color=TEXT):
         self.status.config(text=text, foreground=color)

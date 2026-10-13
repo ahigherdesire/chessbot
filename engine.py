@@ -116,13 +116,17 @@ def top_moves(board, n=3, seconds=0.1, engine_path=None, use_stockfish=True):
     return sorted(cands, key=lambda c: -c["value"])
 
 
-def move_value(board, move, depth=10, seconds=0.1, engine_path=None, use_stockfish=True):
-    """A quick look at how good `move` is: centipawns for the side to move (mates as +-MATE).
-    Stockfish searches to `depth`; the built-in engine for `seconds`."""
+def move_value(board, move=None, depth=10, seconds=0.1, engine_path=None, use_stockfish=True):
+    """A quick look at how good `move` is (None: the best move): centipawns for the side
+    to move (mates as +-MATE). Stockfish searches to `depth`; the built-in engine for `seconds`."""
     path = find_stockfish(engine_path) if use_stockfish else None
     if path:
-        info = stockfish(path).analyse(board, chess.engine.Limit(depth=depth), root_moves=[move])
+        info = stockfish(path).analyse(board, chess.engine.Limit(depth=depth),
+                                       root_moves=[move] if move else None)
         return info["score"].pov(board.turn).score(mate_score=MATE)
+    if move is None:
+        r = Searcher().search(board, seconds, depth)
+        return r["score_cp"] if r["mate"] is None else MATE if r["mate"] > 0 else -MATE
     after = board.copy(stack=False)
     after.push(move)
     if after.is_game_over():

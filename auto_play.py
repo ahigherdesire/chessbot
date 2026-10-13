@@ -329,6 +329,8 @@ class AutoPlayer:
                 "number": self.moves, "san": board.san(move), "color": "white" if me == chess.WHITE else "black",
                 "eval_cp": None if r.get("score_cp") is None else sign * r["score_cp"],
                 "mate": None if r.get("mate") is None else sign * r["mate"],
+                # ours and the best move's value, for the move's accuracy (no "best": r is the engine's top move)
+                "value": _value(r), "best_value": r["best"]["value"] if "best" in r else _value(r),
                 "human": chance, "human_label": lab, "think": think, "premove": premoved,
                 "clock": self.clock.left if self.clock else None,
             })
@@ -430,9 +432,10 @@ class AutoPlayer:
             r, note = pm["result"], "as predicted"
         else:
             # a surprise, but the premove was checked to be fine after their likely replies
-            value = engine.move_value(board, move, engine_path=self.args.engine,
-                                      use_stockfish=not self.args.no_stockfish)
-            r, note = {"move": move, **engine.score_fields(value)}, "after another reply"
+            look = dict(engine_path=self.args.engine, use_stockfish=not self.args.no_stockfish)
+            value = engine.move_value(board, move, **look)
+            best = max(value, engine.move_value(board, None, **look))   # for the accuracy graph
+            r, note = {"move": move, **engine.score_fields(value), "best": {"value": best}}, "after another reply"
         self.moves += 1
         self.log(f"{self.moves}{'.' if board.turn == chess.WHITE else '...'} {board.san(move):<7} premove, {note}")
         if self.clock:

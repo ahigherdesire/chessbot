@@ -86,7 +86,17 @@ Below the settings it shows:
   engine's score,
 * the **last move** and how long the bot took,
 * the **human index** of that move,
+* an **eval graph**: the win chances after each of the bot's moves, from the
+  start of the game (yellow dots are premoves),
+* an **accuracy graph**: each move's accuracy as a bar, with the game average as a
+  line. Accuracy uses lichess's formula: 100% for the engine's best move, less
+  the more win chance a move gives away. Bars are green (good), yellow
+  (inaccuracy), orange (mistake) or red (blunder). Point at either graph to see
+  that move. At accuracy 100% every move is the engine's choice, so it shows 100%,
 * a log of what the bot is doing.
+
+The window can be resized; the graphs and log stretch to fill it. Untick
+**Graphs** for a narrow, one-column window with the log under the game.
 
 Keep the window off the chess board, since the bot reads the board from the screen.
 
