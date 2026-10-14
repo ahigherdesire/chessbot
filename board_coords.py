@@ -30,6 +30,7 @@ import cv2
 import numpy as np
 
 import board_reader as br
+import mouse
 
 try:
     import pyautogui
@@ -119,36 +120,54 @@ class BoardMap:
         return self.square_at(*_gui().position())
 
     # ---- mouse ---------------------------------------------------------- #
-    def _point(self, name, jitter):
+    def _point(self, name, jitter, natural=False):
         x, y = self.center(name)
+        if natural:
+            return mouse.scatter(x, y, self.size)
         j = int(min(jitter, self.size * 0.3))  # never wander out of the square
         return x + random.randint(-j, j), y + random.randint(-j, j)
 
-    def hover(self, name, duration=0.1, jitter=0):
-        """Move the mouse onto a square. jitter: random offset in pixels from the centre."""
-        x, y = self._point(name, jitter)
-        _gui().moveTo(x, y, duration=duration, _pause=False)
+    def _go(self, x, y, duration, natural, speed):
+        if natural:
+            mouse.glide(_gui(), x, y, self.size, speed)
+        else:
+            _gui().moveTo(x, y, duration=duration, _pause=False)
+
+    def hover(self, name, duration=0.1, jitter=0, natural=False, speed=1.0):
+        """Move the mouse onto a square. jitter: random offset in pixels from the centre.
+        natural: move like a hand (curved, uneven, with corrections; mouse.py) at `speed`."""
+        x, y = self._point(name, jitter, natural)
+        self._go(x, y, duration, natural, speed)
         return x, y
 
-    def click(self, name, duration=0.1, jitter=0):
+    def click(self, name, duration=0.1, jitter=0, natural=False, speed=1.0):
         """Move onto a square and click it."""
-        x, y = self.hover(name, duration, jitter)
-        _gui().click(x, y)
+        x, y = self.hover(name, duration, jitter, natural, speed)
+        if natural:
+            mouse.press(_gui(), speed)
+        else:
+            _gui().click(x, y)
         return x, y
 
-    def move(self, frm, to, drag=False, delay=0.15, jitter=0):
+    def move(self, frm, to, drag=False, delay=0.15, jitter=0, natural=False, speed=1.0):
         """Play a move: click from-square then to-square, or drag between them."""
         gui = _gui()
         if drag:
-            self.hover(frm, jitter=jitter)
-            gui.mouseDown()
-            time.sleep(0.05)
-            gui.moveTo(*self._point(to, jitter), duration=max(0.08, delay), _pause=False)
-            gui.mouseUp()
+            self.hover(frm, jitter=jitter, natural=natural, speed=speed)
+            if natural:
+                time.sleep(random.uniform(0.03, 0.09) / speed)
+            gui.mouseDown(_pause=False)
+            time.sleep(random.uniform(0.06, 0.14) / speed if natural else 0.05)
+            x, y = self._point(to, jitter, natural)
+            # a held button makes people a little slower and more careful
+            self._go(x, y, max(0.08, delay), natural, speed * 0.85)
+            if natural:
+                time.sleep(random.uniform(0.02, 0.08) / speed)
+            gui.mouseUp(_pause=False)
         else:
-            self.click(frm, jitter=jitter)
-            time.sleep(delay)
-            self.click(to, jitter=jitter)
+            self.click(frm, jitter=jitter, natural=natural, speed=speed)
+            time.sleep(delay * random.uniform(0.3, 1.0) / speed if natural else delay)
+            self.click(to, jitter=jitter, natural=natural, speed=speed)
 
     # ---- output --------------------------------------------------------- #
     def table(self):

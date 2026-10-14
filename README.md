@@ -76,9 +76,9 @@ python bot_ui.py
 ```
 
 Or double-click `Chess Bot.bat`. A small window opens in the top-right corner
-with the bot's settings: accuracy, think time, human timing, max think, the
-rating for the human index, human moves, side, click or drag, premoves, and
-the clock. Press **Start** and **Stop**
+with the bot's settings: play as an engine or as a human of some rating, accuracy,
+think time, human timing, max think, the rating for the human index, human moves,
+side, click or drag, natural mouse, premoves, and the clock. Press **Start** and **Stop**
 to run the bot. Settings apply from the next move, even while it plays.
 Below the settings it shows:
 
@@ -122,6 +122,46 @@ they are), how many captures and checks are on the board, and whether the
 opponent's move changed the evaluation a lot. `--max-think` caps the longest
 wait (default 30s). After a long think, the bot checks that the board is
 unchanged before moving.
+
+When [playing as a human](#play-as-a-human), human timing is always on. If
+**Human timing** is off, the pace comes from the clock (blitz without one).
+Obviousness is then judged the way people see the position: when Maia says at
+least 70% of players at that rating play the same move, the bot moves quickly.
+When people are split between several moves, it thinks longer. When low on
+time, it still varies its moves (0.05-0.4s), rather than moving like a
+metronome. On 300 positions from real blitz games, playing as a 1500 human:
+
+| reason | share of moves | think time |
+|---|---:|---|
+| obvious to a human | 13% | 0.26-0.75s |
+| recapture, only move, clearly best | 4% | 0.3-1.1s |
+| normal move | 55% | 0.5-5.8s (median 1.7s) |
+| hard choice | 21% | 1.3-7s (median 3.5s) |
+
+That is thinking time only. Reading the board and moving the mouse add about
+another 0.5-1.5s.
+
+### Natural mouse
+
+By default the bot moves the mouse like a hand (`mouse.py`), not in instant jumps:
+
+* **Time** follows Fitts's law: longer and smaller targets take longer. It varies
+  from move to move.
+* **Path**: a slightly bent arc, never a straight line, with a small hand tremor.
+* **Speed**: quick to start, slower to stop, fastest before the halfway point.
+  The mouse updates come at uneven intervals.
+* **Aim**: the main movement lands near the square, not on it, and sometimes
+  goes past it. One or two small corrections follow.
+* **Clicks** land around the middle of the square, rarely the exact centre. The
+  button is held 40-200 ms after a short pause to settle. Drags are a little
+  slower while the button is held.
+
+It moves quicker in faster games (from the clock or Human timing) and 1.5x
+quicker again when low on time. Mouse work per move, from beside the board to
+both clicks: about 1.2s in rapid, 1.0s in blitz, 0.75s in bullet and 0.6s in
+bullet time trouble.
+`--mouse instant` (or untick **Natural mouse**) goes back to fast, straight moves.
+The mouse still aborts the bot when slammed into a screen corner.
 
 ### Premoves
 
@@ -258,6 +298,69 @@ engine's choice this often, usually costing 0.2-0.5 pawns:
 The best move usually gets 30-60%, so values above 50% mean "always play the
 single most human move". Premoves follow human mode too. The log shows what it
 did (`human mode: 2 moves 20%+ human, skipped the engine's e5`).
+
+### Play as a human
+
+`--play-like RATING` makes the bot play like a human of that rating, mistakes
+and all, instead of like an engine. It uses [Maia](https://github.com/CSSLab/maia-chess):
+neural networks from the University of Toronto, trained on about 12 million
+lichess games per rating band to predict the move a human of that rating plays.
+For each move the bot draws one at random with Maia's chances. So it plays the
+natural-looking moves people play, misses what they miss, and blunders about as
+often as they do. That includes falling for the traps real players fall for: after
+1.e4 e5 2.Nf3 Nc6 3.Bc4 Nd4, Maia-1500 grabs the e5 pawn 40% of the time.
+
+Maia needs the lc0 engine and its networks (about 35 MB). Download them once:
+
+```
+python get_maia.py
+python auto_play.py --play-like 1200
+```
+
+Maia has networks for 1100 to 1900; the bot stretches them:
+
+* **Between networks** (1550): the two nearest networks' chances are blended.
+* **Below 1100**: Maia-1100's chances are flattened, so more mistakes slip in.
+* **Above 1900**: Stockfish's scores filter Maia-1900's choices. A move loses
+  weight with how much worse it is than the best move, more strictly the higher
+  the rating. It still plays human moves, but sees through more mistakes.
+* **Bullet** (from the clock, or Human timing set to bullet) and **time
+  trouble** flatten the chances too, because people blunder more when rushed.
+
+In the control panel, set **Play as** to *human* and pick or type a rating
+(400-3000). *engine* plays Stockfish's moves, with **Accuracy** and **Human
+moves**; those two are greyed out while playing as a human. The engine still
+searches for **Think time** to score the moves, for the eval bar and the graphs.
+The log shows each pick
+(`as a 1200 human (blitz, maia): 18% of them play this, best was Nxe5 (1.4 pawns better)`).
+
+Without lc0 and Maia, a rougher built-in model is used. It thinks only as deep as
+the rating allows, and sometimes lapses: it just glances at its own move, misses
+the reply and hangs a piece.
+
+How human is it? I graded 424 real lichess arena games (bullet, blitz and rapid)
+move by move with Stockfish. Then I graded self-play games of the bot at the
+matching rating the same way. Rates are per move. A blunder gives away 15%+ win
+chance, as on lichess:
+
+| | accuracy | avg loss (cp) | mistakes | blunders |
+|---|---:|---:|---:|---:|
+| real 800-1199, rapid | 84.9% | 87 | 4.2% | 10.2% |
+| bot as 1100, rapid | 85.0% | 99 | 3.8% | 11.1% |
+| real 1200-1599, rapid | 87.0% | 68 | 3.6% | 7.8% |
+| bot as 1400, rapid | 87.7% | 73 | 4.0% | 8.7% |
+| real 1200-1599, blitz | 85.3% | 81 | 4.5% | 9.0% |
+| bot as 1400, blitz | 86.1% | 84 | 4.1% | 9.3% |
+| real 1600-1999, bullet | 86.2% | 74 | 4.1% | 7.9% |
+| bot as 1800, bullet | 87.7% | 70 | 3.8% | 7.5% |
+| real 2000-2399, blitz | 89.0% | 54 | 3.7% | 5.4% |
+| bot as 2200, blitz | 89.9% | 46 | 3.6% | 4.8% |
+| real 2400+, bullet | 93.7% | 32 | 1.5% | 2.4% |
+| bot as 2500, bullet | 91.9% | 31 | 2.2% | 1.9% |
+
+The old engine-based model at 1500 had 94% accuracy and 0.2 blunders a game
+(in a small check), nothing like a real 1500. The real-game sample is small at the
+extremes (11 players over 2400). Ratings are lichess ratings.
 
 ## Other board or piece themes
 

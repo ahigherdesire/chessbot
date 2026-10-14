@@ -21,6 +21,7 @@ WHITE_BAR, BLACK_BAR = "#f0f0f0", "#111214"
 GOOD, OK, WARN, BAD = "#5fb760", "#c9b84a", "#d98c3f", "#d0544b"
 TIMING = ["off", "bullet", "blitz", "rapid", "classical"]
 PREMOVE = ["off", "on", "vs engine"]
+PLAY_RATINGS = ["800", "1000", "1200", "1400", "1500", "1600", "1800", "2000", "2200", "2500"]
 LABEL_CHARS = 13   # setting names get the same width in every section, so the sections line up
 GRAPH_W, GRAPH_H = 300, 130
 PAD_L, PAD_R, PAD_T, PAD_B = 26, 6, 6, 6   # room around the plot for the axis labels
@@ -72,6 +73,7 @@ class BotUI:
         self.thread = None
         self.stop = threading.Event()
         self.args = ap.build_parser().parse_args([])
+        self.human_rating = 1500
 
         root.title("Chess Bot")
         root.configure(bg=BG)
@@ -137,35 +139,51 @@ class BotUI:
         f.grid(row=1, column=0, sticky="ew", pady=(2, 8))
         f.columnconfigure(1, weight=1)
 
+        # engine: Stockfish (with accuracy / human moves); human: Maia plays like a player of that rating
+        self.play_as = tk.StringVar(value="engine")
+        self.play_rating = tk.StringVar(value="1500")
+        like = ttk.Frame(f)
+        self.rating_box = ttk.Combobox(like, values=PLAY_RATINGS, textvariable=self.play_rating, width=6)
+        self._inline(like, "human rated", self.rating_box, "")
+        self._row(f, 0, "Play as", ttk.Combobox(f, values=["engine", "human"], textvariable=self.play_as,
+                                               state="readonly", width=10))
+        like.grid(row=0, column=2, sticky="w", padx=(6, 0))
         self.accuracy = tk.DoubleVar(value=100)
-        self._row(f, 0, "Accuracy", self._slider(f, self.accuracy))
-
+        acc_box = self._slider(f, self.accuracy)
+        self._row(f, 1, "Accuracy", acc_box)
         self.think = tk.DoubleVar(value=1.0)
-        self._row(f, 1, "Think time", ttk.Spinbox(f, from_=0.1, to=10, increment=0.1, textvariable=self.think,
+        self._row(f, 2, "Think time", ttk.Spinbox(f, from_=0.1, to=10, increment=0.1, textvariable=self.think,
                                                  width=8), "seconds of engine search")
         self.timing = tk.StringVar(value="off")
-        self._row(f, 2, "Human timing", ttk.Combobox(f, values=TIMING, textvariable=self.timing, state="readonly",
+        self._row(f, 3, "Human timing", ttk.Combobox(f, values=TIMING, textvariable=self.timing, state="readonly",
                                                     width=10), "fast on easy moves, slow on hard")
         self.max_think = tk.DoubleVar(value=30)
-        self._row(f, 3, "Max think", ttk.Spinbox(f, from_=1, to=120, increment=1, textvariable=self.max_think,
+        self._row(f, 4, "Max think", ttk.Spinbox(f, from_=1, to=120, increment=1, textvariable=self.max_think,
                                                 width=8), "seconds, caps human timing")
         self.rating = tk.IntVar(value=1500)
-        self._row(f, 4, "Human index", ttk.Spinbox(f, from_=600, to=2800, increment=100, textvariable=self.rating,
+        self._row(f, 5, "Human index", ttk.Spinbox(f, from_=600, to=2800, increment=100, textvariable=self.rating,
                                                   width=8), "rating to compare with")
         self.human_moves = tk.DoubleVar(value=0)
-        self._row(f, 5, "Human moves", ttk.Spinbox(f, from_=0, to=100, increment=5, textvariable=self.human_moves,
-                                                  width=8), "% min human chance, 0 = off")
+        hm_box = ttk.Spinbox(f, from_=0, to=100, increment=5, textvariable=self.human_moves, width=8)
+        self._row(f, 6, "Human moves", hm_box, "% min human chance, 0 = off")
+        self.acc_label = acc_box.label
+        self.engine_only = [acc_box.scale, hm_box]   # playing as a human picks its own moves: these do nothing then
+        # side and click/drag share a row to keep the window short
         self.side = tk.StringVar(value="auto")
         self.side_box = ttk.Combobox(f, values=["auto", "white", "black"], textvariable=self.side,
                                      state="readonly", width=10)
-        self._row(f, 6, "Play as", self.side_box, "auto = side at the bottom")
         self.move_with = tk.StringVar(value="click")
-        self._row(f, 7, "Move by", ttk.Combobox(f, values=["click", "drag"], textvariable=self.move_with,
-                                               state="readonly", width=10))
+        by = ttk.Frame(f)
+        self._inline(by, "move by", ttk.Combobox(by, values=["click", "drag"], textvariable=self.move_with,
+                                                 state="readonly", width=6), "")
+        self._row(f, 7, "Side", self.side_box)
+        by.grid(row=7, column=2, sticky="w", padx=(6, 0))
         checks = ttk.Frame(f)
         checks.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
         self.dry_run = tk.BooleanVar(value=False)
-        ttk.Checkbutton(checks, text="Dry run (hover, never click)", variable=self.dry_run).pack(side="left")
+        ttk.Checkbutton(checks, text="Dry run", variable=self.dry_run).pack(side="left")
+        self.natural_mouse = tk.BooleanVar(value=True)
+        ttk.Checkbutton(checks, text="Natural mouse", variable=self.natural_mouse).pack(side="left", padx=(12, 0))
         self.on_top = tk.BooleanVar()
         ttk.Checkbutton(checks, text="Keep on top", variable=self.on_top,
                         command=self.toggle_top).pack(side="left", padx=(12, 0))
@@ -173,8 +191,8 @@ class BotUI:
         ttk.Checkbutton(checks, text="Graphs", variable=self.show_graphs,
                         command=self.layout).pack(side="left", padx=(12, 0))
 
-        for var in (self.accuracy, self.think, self.timing, self.max_think, self.rating, self.human_moves,
-                    self.move_with, self.dry_run):
+        for var in (self.play_as, self.play_rating, self.accuracy, self.think, self.timing, self.max_think,
+                    self.rating, self.human_moves, self.move_with, self.dry_run, self.natural_mouse):
             var.trace_add("write", lambda *_: self.apply())
 
     def _premove_settings(self, parent):
@@ -216,6 +234,7 @@ class BotUI:
                           command=lambda _: label.config(text=f"{var.get():.0f}%"))
         scale.pack(side="left")
         label.pack(side="left", padx=(6, 0))
+        box.scale, box.label = scale, label
         return box
 
     def _controls(self, parent):
@@ -337,6 +356,16 @@ class BotUI:
             a.premove_streak = max(1, int(self.premove_streak.get()))
         except (tk.TclError, ValueError):
             return                     # a half-typed number: keep the previous value
+        human = self.play_as.get() == "human"
+        like = self.play_rating.get().strip()
+        if like.isdigit() and 400 <= int(like) <= 3000:
+            self.human_rating = int(like)  # anything else is half-typed: keep the previous rating
+        a.play_like = self.human_rating if human else None
+        for w in self.engine_only:
+            w.state(["disabled"] if human else ["!disabled"])
+        self.rating_box.state(["!disabled"] if human else ["disabled"])
+        self.acc_label.config(foreground=MUTED if human else TEXT)
+        a.mouse = "natural" if self.natural_mouse.get() else "instant"
         a.human = None if self.timing.get() == "off" else self.timing.get()
         a.premove = self.premove_mode.get() != "off"
         a.opponent_engine = self.premove_mode.get() == "vs engine"

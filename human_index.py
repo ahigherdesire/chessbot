@@ -10,10 +10,12 @@ moving an attacked piece) or tend to overlook (backward retreats, long quiet mov
 early king walks).
 """
 import math
+import random
 
 import chess
 
 import engine
+import maia
 
 RANK_WEIGHT = 1.2
 
@@ -45,6 +47,33 @@ def looks(board, rating=1500, engine_path=None, use_stockfish=True):
         # one thread and a clear hash: otherwise a search this short gives a different answer each time
         return engine.stockfish_lines(path, board, None, depth=depth, threads=1, hash_mb=16, fresh=True)[0]
     return engine.Searcher().score_root(board, 5.0, depth, None, engine.INF)[0]
+
+
+def glance(board):
+    """How every legal move looks at a glance, without a thought for the reply: the
+    position right after it, by the built-in static evaluation (centipawns for the side
+    to move). A piece left hanging, or walking into a fork, looks fine this way."""
+    out = []
+    for move in board.legal_moves:
+        board.push(move)
+        value = engine.MATE if board.is_checkmate() else -engine.evaluate(board)
+        board.pop()
+        out.append({"move": move, "value": value})
+    return out
+
+
+def sharpness(board):
+    """0-1: how much is going on (captures and checks for both sides), where lapses are likelier."""
+    def forcing(b):
+        return sum(1 for m in b.legal_moves if b.is_capture(m) or b.gives_check(m))
+
+    ours = forcing(board)
+    theirs = 0
+    if not board.is_check():          # their threats: what they could do if it were their move
+        board.push(chess.Move.null())
+        theirs = forcing(board)
+        board.pop()
+    return min(1.0, (ours + theirs) / 12)
 
 
 def chances(board, rating=1500, last_to=None, engine_path=None, use_stockfish=True):
@@ -79,14 +108,15 @@ def naturalness(board, move, last_to=None):
     return bonus
 
 
-def human_odds(board, cands, rating=1500, last_to=None):
+def human_odds(board, cands, rating=1500, last_to=None, spread=1.0):
     """[(move, chance)] for every scored move, most human first. Chances sum to 1.
-    cands: scored moves; looks() gives a human's view, engine scores a perfect player's."""
+    cands: scored moves; looks() gives a human's view, engine scores a perfect player's.
+    spread: how loosely the player picks between moves (2 = shrugs off twice as much)."""
     if not cands:
         return []
     cands = sorted(cands, key=lambda c: -c["value"])
     best = cands[0]["value"]
-    t = temperature(rating)
+    t = temperature(rating) * spread
     # humans mostly pick among the first few candidates, even when the rest are nearly as good
     logits = [-min(best - c["value"], 1000) / t - RANK_WEIGHT * math.log(i + 1)
               + naturalness(board, c["move"], last_to) for i, c in enumerate(cands)]
@@ -113,10 +143,92 @@ def human_move(board, rating=1500, min_chance=0.1, seconds=1.0, last_to=None, ac
             "human": odds.get(chosen["move"], 0), "allowed": len(allowed), "accuracy": accuracy}
 
 
-def choose_move(board, args, seconds, last_to=None):
+# Playing as a human of a given rating ("play like"): Maia's chances for each move, from
+# networks trained on real games (maia.py). Maia covers 1100-1900; the settings below
+# stretch it to other ratings, faster games and time trouble.
+# Tuned so self-play matches graded real lichess games (accuracy, mistake and blunder rates).
+BELOW_MAIA = 750        # under 1100, flatten Maia-1100's chances: 1 + (1100 - rating) / this
+FLATTEN = {"rapid": 1.0, "blitz": 1.09, "bullet": 1.12}   # faster games: more errors
+LOW_TIME_FLATTEN = 1.25
+ABOVE_MAIA_T0 = 1000    # over 1900, the engine vetoes mistakes such a player would see through:
+ABOVE_MAIA_HALF = 140   # a move loses exp(-loss / T), T = T0 halved every HALF points over 1900
+
+
+def pace(clock=None, timing=None):
+    """bullet, blitz or rapid: from the time control ("3+2") if known, else the human timing pace."""
+    if clock:
+        base = float(clock.split("+")[0]) * 60
+        return "bullet" if base < 180 else "blitz" if base < 480 else "rapid"
+    return {"bullet": "bullet", "rapid": "rapid", "classical": "rapid"}.get(timing, "blitz")
+
+
+def maia_odds(board, rating, cands, tc="blitz", low_time=False):
+    """{move: chance} for a human of `rating`: Maia's chances, flattened (more mistakes)
+    below 1100, in faster games and in time trouble, and filtered by the engine's scores
+    (`cands`) above 1900."""
+    p = maia.policy(board, rating)
+    flatten = 1.0
+    if rating < maia.RATINGS[0]:
+        flatten *= 1 + (maia.RATINGS[0] - rating) / BELOW_MAIA
+    flatten *= FLATTEN.get(tc, 1.0)
+    if low_time:
+        flatten *= LOW_TIME_FLATTEN
+    logit = {m: math.log(max(v, 1e-6)) / flatten for m, v in p.items()}
+    if rating > maia.RATINGS[-1]:
+        t = ABOVE_MAIA_T0 * 2 ** (-(rating - maia.RATINGS[-1]) / ABOVE_MAIA_HALF)
+        value = {c["move"]: c["value"] for c in cands}
+        best = max(value.values())
+        for m in logit:
+            logit[m] -= min(best - value.get(m, best - 1000), 1000) / t
+    top = max(logit.values())
+    w = {m: math.exp(x - top) for m, x in logit.items()}
+    total = sum(w.values())
+    return {m: x / total for m, x in w.items()}
+
+
+def lapse_odds(board, rating, last_to=None, low_time=False, engine_path=None, use_stockfish=True):
+    """Without Maia: a rougher model. Usually the player thinks as deep as their rating
+    allows (looks()); now and then they lapse and go by a glance (glance()), blind to
+    the reply, which is how players hang pieces. Lapses are likelier at lower ratings,
+    in sharp positions and in time trouble."""
+    lapse = 0.12 * 2 ** (-(rating - 1000) / 700)
+    q = min(0.9, lapse * (0.5 + sharpness(board)) * (2 if low_time else 1))
+    look = dict(human_odds(board, looks(board, rating, engine_path, use_stockfish), rating, last_to, 2.5))
+    blind = dict(human_odds(board, glance(board), rating, last_to, 2.5))
+    return {m: (1 - q) * look.get(m, 0) + q * blind.get(m, 0) for m in set(look) | set(blind)}
+
+
+def play_like(board, rating=1500, seconds=1.0, last_to=None, tc="blitz", low_time=False,
+              engine_path=None, use_stockfish=True, rng=random):
+    """Play like a human of `rating`, mistakes and all: a move drawn at random with the
+    chance such a player plays it (maia_odds(), or lapse_odds() without Maia). The
+    engine's full search scores the moves, for the eval and accuracy shown (and, above
+    1900, to veto mistakes). Returns an engine.best_move()-style result plus "human"
+    (the chance of the chosen move) and "source" (maia or model)."""
+    cands = score_all(board, seconds, engine_path, use_stockfish)
+    if maia.available():
+        odds, source = maia_odds(board, rating, cands, tc, low_time), "maia"
+    else:
+        odds, source = lapse_odds(board, rating, last_to, low_time, engine_path, use_stockfish), "model"
+    moves = list(odds)
+    move = rng.choices(moves, [odds[m] for m in moves])[0]
+    chosen = next((c for c in cands if c["move"] == move), None)
+    if chosen is None:   # the built-in engine ran out of time before scoring it
+        chosen = {"move": move, "pv": [move], **engine.score_fields(min(c["value"] for c in cands)),
+                  "value": min(c["value"] for c in cands)}
+    best = max(cands, key=lambda c: c["value"])
+    return {**chosen, "best": best, "loss_cp": best["value"] - chosen["value"], "cands": cands,
+            "human": odds[move], "play_like": rating, "pace": tc, "source": source}
+
+
+def choose_move(board, args, seconds, last_to=None, low_time=False):
     """The move to play under the bot's settings (an argparse namespace like auto_play's):
-    human mode when args.human_moves is set, otherwise the engine with --accuracy."""
+    "play like" a rating when args.play_like is set, else human mode when args.human_moves
+    is set, otherwise the engine with --accuracy. low_time: we are short of time."""
     use_sf = not args.no_stockfish
+    if getattr(args, "play_like", None):
+        tc = pace(getattr(args, "clock", None), getattr(args, "human", None))
+        return play_like(board, args.play_like, seconds, last_to, tc, low_time, args.engine, use_sf)
     if getattr(args, "human_moves", 0):
         return human_move(board, args.human_index or 1500, args.human_moves / 100, seconds, last_to,
                           args.accuracy, args.engine, use_sf)

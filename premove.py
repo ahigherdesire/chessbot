@@ -199,7 +199,7 @@ def plan(game, args, low_time=False):
     after.push(reply)
     if after.is_game_over():
         return None, None
-    r = human_index.choose_move(after, args, t if low_time else 2 * t, reply.to_square)   # human mode too
+    r = human_index.choose_move(after, args, t if low_time else 2 * t, reply.to_square, low_time)   # human mode too
     move = r["move"]
     if move.promotion and not (args.auto_queen and move.promotion == chess.QUEEN):
         return None, "a promotion cannot be premoved"   # the picker only opens after the move

@@ -25,42 +25,54 @@ import board_coords as bc
 import board_reader as br
 import engine
 import human_index
+import maia
+import mouse
 import premove
 
 START = chess.Board().board_fen()
 PROMO_ORDER = [chess.QUEEN, chess.KNIGHT, chess.ROOK, chess.BISHOP]  # chess.com and lichess pickers
 
 
-def play_move(bm, move, drag=False, delay=0.15, jitter=3, auto_queen=False):
-    """Click `move` on the board described by BoardMap `bm`."""
+def play_move(bm, move, drag=False, delay=0.15, jitter=3, auto_queen=False, natural=False, speed=1.0):
+    """Click `move` on the board described by BoardMap `bm`. natural: move the mouse like
+    a hand (mouse.py), at `speed` (> 1 quicker)."""
     frm, to = chess.square_name(move.from_square), chess.square_name(move.to_square)
-    bm.move(frm, to, drag=drag, delay=delay, jitter=jitter)
+    bm.move(frm, to, drag=drag, delay=delay, jitter=jitter, natural=natural, speed=speed)
     if move.promotion and not (auto_queen and move.promotion == chess.QUEEN):
         # the picker opens on the promotion square and runs Q, N, R, B towards the board centre
         time.sleep(0.3)
         x, y = bm.center(to)
         k = PROMO_ORDER.index(move.promotion)
         y += round(k * bm.size) if bm[to].top < bm.ys[4] else -round(k * bm.size)
-        bc.pyautogui.moveTo(x, y, duration=0.1, _pause=False)
-        bc.pyautogui.click(x, y)
+        if natural:
+            mouse.glide(bc.pyautogui, x, y, bm.size, speed)
+            mouse.press(bc.pyautogui, speed)
+        else:
+            bc.pyautogui.moveTo(x, y, duration=0.1, _pause=False)
+            bc.pyautogui.click(x, y)
 
 
 PACES = {"bullet": 0.25, "blitz": 0.5, "rapid": 1.0, "classical": 2.0}
 PREMOVE_GRACE = 1.5     # seconds to wait for the site to play our premove once their reply is on screen
 LOW_TIME_THINK = 0.3    # engine seconds per move when low on time
+MOUSE_SPEED = {"bullet": 2.2, "blitz": 1.5, "rapid": 1.15}   # natural mouse: quicker in faster games
 
 
-def think_time(board, top, opp_move=None, prev_eval=None, moves=0, pace=1.0, rng=random):
+def think_time(board, top, opp_move=None, prev_eval=None, moves=0, pace=1.0, rng=random, human_top=None):
     """How long a human would take here, in seconds, and why.
 
     board: position with us to move. top: engine.top_moves() for it, best first.
     opp_move: the opponent's last move. prev_eval: our eval (centipawns) after our
-    previous move. moves: how many moves we have already played this game."""
+    previous move. moves: how many moves we have already played this game.
+    human_top: when playing as a human, Maia's chance for the most popular move
+    (how obvious the position is to a person, rather than to an engine)."""
     n = board.legal_moves.count()
     if n == 1:
         return rng.uniform(0.3, 0.8), "only move"
     if moves < 5:
         return pace * rng.uniform(0.4, 1.8), "opening"
+    if human_top is not None and human_top >= 0.7:
+        return pace * rng.uniform(0.5, 1.5), "obvious to a human"
     if not top:   # no Stockfish: judge from the position alone
         d = 0.5 * min(n, 40) / 40 + 0.5 * min(_forcing(board), 6) / 6
         return max(0.3, pace * (1 + 10 * d * d) * rng.lognormvariate(0, 0.3)), "thinking"
@@ -80,6 +92,8 @@ def think_time(board, top, opp_move=None, prev_eval=None, moves=0, pace=1.0, rng
 
     # several moves almost as good is a hard choice - unless they all still win easily
     closeness = 0 if len(top) > 1 and top[1]["value"] > 400 else 1 - min(gap, 200) / 200
+    if human_top is not None and human_top < 0.4:
+        closeness = max(closeness, (0.4 - human_top) / 0.3)   # people are split between several moves
     complexity = min(n, 40) / 40
     tactics = min(_forcing(board), 6) / 6                # captures and checks to calculate
     swing = 0 if prev_eval is None else min(abs(best["value"] - prev_eval), 300) / 300  # a surprise
@@ -101,9 +115,14 @@ def _forcing(board):
     return sum(1 for m in board.legal_moves if board.is_capture(m) or board.gives_check(m))
 
 
-def park(bm):
+def park(bm, natural=False, speed=1.0):
     """Move the mouse just right of the board so it does not cover any pieces."""
-    bc.pyautogui.moveTo(bm.xs[8] + round(bm.size * 0.4), bm.ys[4], duration=0.1, _pause=False)
+    x, y = bm.xs[8] + round(bm.size * 0.4), bm.ys[4]
+    if natural:   # somewhere off the board's right edge, not the same pixel every time
+        x, y = x + round(random.uniform(-0.2, 0.6) * bm.size), y + round(random.gauss(0, bm.size))
+        mouse.glide(bc.pyautogui, x, y, bm.size, speed)
+    else:
+        bc.pyautogui.moveTo(x, y, duration=0.1, _pause=False)
 
 
 class AutoPlayer:
@@ -260,17 +279,27 @@ class AutoPlayer:
         t0 = time.time()
         retry = placement == self.played_from
         wait, seconds = 0.0, self.args.time
+        # playing as a human always takes human time: the pace from the clock if timing is off
+        timing = self.args.human or (human_index.pace(self.args.clock) if self.args.play_like else None)
         if retry:
             self.log("   move did not register, clicking it again")
         elif self.low_on_time():
             seconds = min(seconds, LOW_TIME_THINK)
-        elif self.args.human:
+            if timing:   # rushed, but not like a metronome
+                wait = random.uniform(0.05, 0.4)
+                self.log(f"   thinking {wait:.1f}s (time trouble)")
+        elif timing:
             top = engine.top_moves(board, 3, 0.1, self.args.engine, not self.args.no_stockfish)
-            wait, why = think_time(board, top, self.opp_move, self.last_eval, self.moves, PACES[self.args.human])
+            human_top = None
+            if self.args.play_like and maia.available():
+                human_top = max(maia.policy(board, self.args.play_like).values())
+            wait, why = think_time(board, top, self.opp_move, self.last_eval, self.moves, PACES[timing],
+                                   human_top=human_top)
             wait = min(wait, self.args.max_think)
             seconds = min(seconds, max(0.1, wait * 0.8))   # quick moves must not wait on the engine
             self.log(f"   thinking {wait:.1f}s ({why})")
-        r = human_index.choose_move(board, self.args, seconds, self.opp_move.to_square if self.opp_move else None)
+        r = human_index.choose_move(board, self.args, seconds, self.opp_move.to_square if self.opp_move else None,
+                                    low_time=self.low_on_time())
         if wait > 0:
             if self.stop.wait(max(0.0, t0 + wait - time.time())):
                 return False
@@ -288,20 +317,27 @@ class AutoPlayer:
               f"{chess.square_name(move.to_square)}{bm.center(chess.square_name(move.to_square))}")
         if "allowed" in r:
             self.log(f"   human mode: {self.human_mode_note(board, r)}")
+        elif "play_like" in r:
+            note = f"   as a {r['play_like']} human ({r['pace']}, {r['source']}): {r['human']:.0%} of them play this"
+            if r["best"]["move"] != move:
+                gap = "the difference is a mate" if r["loss_cp"] > engine.MATE // 2 \
+                    else f"{r['loss_cp'] / 100:.1f} pawns better"
+                note += f", best was {board.san(r['best']['move'])} ({gap})"
+            self.log(note)
 
         if self.args.dry_run:
-            bm.hover(chess.square_name(move.from_square), duration=0.2)
+            bm.hover(chess.square_name(move.from_square), duration=0.2, **self.mouse_style())
             time.sleep(0.3)
-            bm.hover(chess.square_name(move.to_square), duration=0.2)
+            bm.hover(chess.square_name(move.to_square), duration=0.2, **self.mouse_style())
         else:
             play_move(bm, move, drag=self.args.drag, delay=self.args.delay,
-                      jitter=self.args.jitter, auto_queen=self.args.auto_queen)
-        park(bm)
-        if self.clock:
+                      jitter=self.args.jitter, auto_queen=self.args.auto_queen, **self.mouse_style())
+        if self.clock:  # our clock stopped when the move landed, before the mouse moves away
             if retry:   # the clock kept running since the click that did not register
                 self.clock.spend(time.time() - self.played_at, increment=False)
             else:       # it started when their move landed, about one screenshot before we saw it
                 self.clock.spend(time.time() - t_look + self.args.poll)
+        park(bm, **self.mouse_style())
         self.after_move(board, r, wait)
         self.played_from = placement
         if not retry:
@@ -361,6 +397,14 @@ class AutoPlayer:
     def low_on_time(self):
         return self.clock is not None and self.clock.left < self.args.low_time
 
+    def mouse_style(self):
+        """How to move the mouse now: like a hand (--mouse natural), quicker in faster
+        games and when low on time; or straight and fast (--mouse instant)."""
+        if self.args.mouse != "natural":
+            return {"natural": False}
+        speed = MOUSE_SPEED[human_index.pace(self.args.clock, self.args.human)]
+        return {"natural": True, "speed": speed * (1.5 if self.low_on_time() else 1.0)}
+
     def queue_premove(self, bm):
         """Right after our move: if their reply is predictable, click our answer to it now."""
         if not self.args.premove or self.game is None:
@@ -387,14 +431,14 @@ class AutoPlayer:
         self.log(f"   premove {san} if {reply} ({pm['why']})")
         frm, to = chess.square_name(pm["move"].from_square), chess.square_name(pm["move"].to_square)
         if self.args.dry_run:
-            bm.hover(frm, duration=0.2)
+            bm.hover(frm, duration=0.2, **self.mouse_style())
             time.sleep(0.3)
-            bm.hover(to, duration=0.2)
-            park(bm)
+            bm.hover(to, duration=0.2, **self.mouse_style())
+            park(bm, **self.mouse_style())
             return                     # nothing was queued on the site
         play_move(bm, pm["move"], drag=self.args.drag, delay=self.args.delay,
-                  jitter=self.args.jitter, auto_queen=self.args.auto_queen)
-        park(bm)
+                  jitter=self.args.jitter, auto_queen=self.args.auto_queen, **self.mouse_style())
+        park(bm, **self.mouse_style())
         self.premove = {**pm, "san": san, "shown": premove.shown(self.game, pm["move"]), "since": None}
         self.on_premove("queued", f"{san} if {reply} ({pm['why']})")
 
@@ -472,6 +516,9 @@ def build_parser():
     p.add_argument("--engine", help="path to a UCI engine such as stockfish.exe")
     p.add_argument("--no-stockfish", action="store_true", help="always use the built-in engine")
     p.add_argument("--drag", action="store_true", help="drag pieces instead of click-click")
+    p.add_argument("--mouse", choices=["natural", "instant"], default="natural",
+                   help="natural (default): move the mouse like a hand, curved and uneven with small "
+                        "corrections; instant: straight and fast")
     p.add_argument("--delay", type=float, default=0.15, help="seconds between the two clicks")
     p.add_argument("--jitter", type=int, default=3, help="random pixels off the square centre")
     p.add_argument("--auto-queen", action="store_true", help="the site promotes to a queen by itself")
@@ -488,6 +535,9 @@ def build_parser():
     p.add_argument("--human-moves", type=float, default=0, metavar="PERCENT",
                    help="human mode: only play moves a human of the --human-index rating (default 1500) "
                         "picks at least this often, e.g. 10 (default 0 = off)")
+    p.add_argument("--play-like", type=int, metavar="RATING",
+                   help="play like a human of this rating, e.g. 1200: pick moves with the chances the human "
+                        "index gives that player (overrides --accuracy and --human-moves)")
     p.add_argument("--max-think", type=float, default=30.0, help="longest human-like think in seconds")
     p.add_argument("--premove", action="store_true",
                    help="premove when their reply is at least 70%% likely (only move, book opening, clear "
