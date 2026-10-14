@@ -7,3 +7,7 @@ __pycache__/
 
 # Claude Code notes
 CLAUDE.md
+
+# Windows app build (python build_exe.py)
+build/
+dist/

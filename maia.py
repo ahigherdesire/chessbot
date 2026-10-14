@@ -10,11 +10,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 
 import chess
 import chess.engine
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))   # the .exe's folder when built
 RATINGS = list(range(1100, 2000, 100))
 _ENGINES = {}
 _LINE = re.compile(r"^(\S+)\s.*\(P:\s*([\d.]+)%\)")
@@ -48,7 +49,8 @@ def _engine(rating):
             return eng
         except (chess.engine.EngineError, chess.engine.EngineTerminatedError):
             pass
-    eng = chess.engine.SimpleEngine.popen_uci(find_lc0(), stderr=subprocess.DEVNULL)
+    eng = chess.engine.SimpleEngine.popen_uci(find_lc0(), stderr=subprocess.DEVNULL,
+                                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     # PolicyTemperature 1: the network's own chances (lc0 flattens them by default)
     eng.configure({"WeightsFile": weights(rating), "PolicyTemperature": "1.0", "VerboseMoveStats": True,
                    "Threads": 1, "MinibatchSize": 1})

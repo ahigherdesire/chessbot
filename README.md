@@ -17,6 +17,29 @@ Options: `--time 5` (seconds to think), `--turn w|b` (force side to move),
 The bot prints the board, the FEN, a lichess analysis link, the engine's thinking,
 and the best move. It also saves a copy of the image with an arrow drawn on it.
 
+## Windows app (no Python needed)
+
+```
+pip install pyinstaller
+python get_maia.py      # optional: lc0 + Maia for "play as human"
+python build_exe.py
+```
+
+This builds `dist/ChessBot/` and zips it to `dist/ChessBot.zip` (about 170 MB).
+Copy the folder or the zip to any 64-bit Windows PC; Python is not needed there.
+
+* `ChessBot.exe`: the control panel (the same as `Chess Bot.bat`).
+* `chessbot-cli.exe`: the command-line tools in one program:
+  `chessbot-cli analyze screen`, `chessbot-cli fen "<FEN>"`, `chessbot-cli calibrate ...`
+  (chessbot.py), `chessbot-cli play ...` (auto_play.py), `chessbot-cli board map` (board_coords.py).
+* `engines/`: Stockfish (copied from wherever the bot finds it on this PC), lc0 and
+  the Maia networks. Without Stockfish the app uses its built-in engine; without
+  lc0 and Maia, human mode uses the fallback model.
+* `templates/`: the piece templates. `calibrate` writes new ones here.
+
+Keep the files together: the programs look for `engines/` and `templates/` next to
+themselves.
+
 ## How it reads the board
 
 * **Board location**: it finds the two square colours that form an 8x8 checker

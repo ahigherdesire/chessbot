@@ -10,6 +10,7 @@ Pipeline:
 """
 import json
 import os
+import sys
 
 import chess
 import cv2
@@ -17,7 +18,7 @@ import numpy as np
 
 FEAT = 64  # every square is normalised to FEAT x FEAT pixels
 SYMBOLS = "PNBRQKpnbrqk"
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))   # the .exe's folder when built
 DEFAULT_TEMPLATES = os.path.join(HERE, "templates", "default")
 
 

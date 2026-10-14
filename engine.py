@@ -7,13 +7,15 @@ import math
 import os
 import random
 import shutil
+import subprocess
+import sys
 import threading
 import time
 
 import chess
 import chess.engine
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))   # the .exe's folder when built
 MATE = 100000
 INF = 10 ** 9
 
@@ -47,7 +49,7 @@ def stockfish(path, threads=None, hash_mb=256):
             return eng
         except (chess.engine.EngineError, chess.engine.EngineTerminatedError):
             pass
-    eng = chess.engine.SimpleEngine.popen_uci(path)
+    eng = chess.engine.SimpleEngine.popen_uci(path, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))   # no console window
     eng.configure({"Threads": threads or max(1, (os.cpu_count() or 2) - 1), "Hash": hash_mb})
     _ENGINES[key] = eng
     return eng

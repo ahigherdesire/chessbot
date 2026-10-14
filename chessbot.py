@@ -122,19 +122,7 @@ def cmd_analyze(args):
         cv2.arrowedLine(ann, a, b, (0, 140, 255), max(3, int(g["size"] / 9)), cv2.LINE_AA, tipLength=0.25)
         cv2.imwrite(out, ann)
         print(f"Saved move arrow to {out}")
-    if r and args.play:
-        import auto_play
-        print("Playing move in 2 seconds... (move mouse to a corner to abort)")
-        time.sleep(2.0)
-        ox, oy = getattr(info, "offset", (0, 0))  # or pass the monitor offsets
-        g, wb = info["grid"], info["white_bottom"]
-        fx, fy = br.square_center(g, r["move"].from_square, wb)
-        tx, ty = br.square_center(g, r["move"].to_square, wb)
-        auto_play.click_move(
-            {"x": g["x"] + ox, "y": g["y"] + oy, "size": g["size"]},
-            r["move"], wb, delay=0.2, drag=args.drag,
-        )
-        print(f"Clicked {chess.square_name(r['move'].from_square)} -> {chess.square_name(r['move'].to_square)}")
+
 
 def cmd_fen(args):
     think(chess.Board(args.fen), args)
