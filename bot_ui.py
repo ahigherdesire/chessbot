@@ -21,6 +21,7 @@ WHITE_BAR, BLACK_BAR = "#f0f0f0", "#111214"
 GOOD, OK, WARN, BAD = "#5fb760", "#c9b84a", "#d98c3f", "#d0544b"
 TIMING = ["off", "bullet", "blitz", "rapid", "classical"]
 PREMOVE = ["off", "on", "vs engine"]
+GAME_MODES = ["none"] + list(ap.TIME_CONTROLS)   # or type any minutes+increment
 PLAY_RATINGS = ["800", "1000", "1200", "1400", "1500", "1600", "1800", "2000", "2200", "2500"]
 LABEL_CHARS = 13   # setting names get the same width in every section, so the sections line up
 GRAPH_W, GRAPH_H = 300, 130
@@ -139,33 +140,41 @@ class BotUI:
         f.grid(row=1, column=0, sticky="ew", pady=(2, 8))
         f.columnconfigure(1, weight=1)
 
+        # the time control: picking one fills in the recommended settings below, which stay editable
+        self.clock = tk.StringVar(value="none")
+        self.filled_for = "none"
+        mode_box = ttk.Combobox(f, values=GAME_MODES, textvariable=self.clock, width=10)
+        for event in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
+            mode_box.bind(event, lambda _: self.fill_recommended())
+        self._row(f, 0, "Game mode", mode_box, "minutes+increment, fills in the rest")
+
         # engine: Stockfish (with accuracy / human moves); human: Maia plays like a player of that rating
         self.play_as = tk.StringVar(value="engine")
         self.play_rating = tk.StringVar(value="1500")
         like = ttk.Frame(f)
         self.rating_box = ttk.Combobox(like, values=PLAY_RATINGS, textvariable=self.play_rating, width=6)
         self._inline(like, "human rated", self.rating_box, "")
-        self._row(f, 0, "Play as", ttk.Combobox(f, values=["engine", "human"], textvariable=self.play_as,
+        self._row(f, 1, "Play as", ttk.Combobox(f, values=["engine", "human"], textvariable=self.play_as,
                                                state="readonly", width=10))
-        like.grid(row=0, column=2, sticky="w", padx=(6, 0))
+        like.grid(row=1, column=2, sticky="w", padx=(6, 0))
         self.accuracy = tk.DoubleVar(value=100)
         acc_box = self._slider(f, self.accuracy)
-        self._row(f, 1, "Accuracy", acc_box)
+        self._row(f, 2, "Accuracy", acc_box)
         self.think = tk.DoubleVar(value=1.0)
-        self._row(f, 2, "Think time", ttk.Spinbox(f, from_=0.1, to=10, increment=0.1, textvariable=self.think,
+        self._row(f, 3, "Think time", ttk.Spinbox(f, from_=0.1, to=10, increment=0.1, textvariable=self.think,
                                                  width=8), "seconds of engine search")
         self.timing = tk.StringVar(value="off")
-        self._row(f, 3, "Human timing", ttk.Combobox(f, values=TIMING, textvariable=self.timing, state="readonly",
+        self._row(f, 4, "Human timing", ttk.Combobox(f, values=TIMING, textvariable=self.timing, state="readonly",
                                                     width=10), "fast on easy moves, slow on hard")
         self.max_think = tk.DoubleVar(value=30)
-        self._row(f, 4, "Max think", ttk.Spinbox(f, from_=1, to=120, increment=1, textvariable=self.max_think,
+        self._row(f, 5, "Max think", ttk.Spinbox(f, from_=1, to=120, increment=1, textvariable=self.max_think,
                                                 width=8), "seconds, caps human timing")
         self.rating = tk.IntVar(value=1500)
-        self._row(f, 5, "Human index", ttk.Spinbox(f, from_=600, to=2800, increment=100, textvariable=self.rating,
+        self._row(f, 6, "Human index", ttk.Spinbox(f, from_=600, to=2800, increment=100, textvariable=self.rating,
                                                   width=8), "rating to compare with")
         self.human_moves = tk.DoubleVar(value=0)
         hm_box = ttk.Spinbox(f, from_=0, to=100, increment=5, textvariable=self.human_moves, width=8)
-        self._row(f, 6, "Human moves", hm_box, "% min human chance, 0 = off")
+        self._row(f, 7, "Human moves", hm_box, "% min human chance, 0 = off")
         self.acc_label = acc_box.label
         self.engine_only = [acc_box.scale, hm_box]   # playing as a human picks its own moves: these do nothing then
         # side and click/drag share a row to keep the window short
@@ -176,10 +185,10 @@ class BotUI:
         by = ttk.Frame(f)
         self._inline(by, "move by", ttk.Combobox(by, values=["click", "drag"], textvariable=self.move_with,
                                                  state="readonly", width=6), "")
-        self._row(f, 7, "Side", self.side_box)
-        by.grid(row=7, column=2, sticky="w", padx=(6, 0))
+        self._row(f, 8, "Side", self.side_box)
+        by.grid(row=8, column=2, sticky="w", padx=(6, 0))
         checks = ttk.Frame(f)
-        checks.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        checks.grid(row=9, column=0, columnspan=3, sticky="w", pady=(4, 0))
         self.dry_run = tk.BooleanVar(value=False)
         ttk.Checkbutton(checks, text="Dry run", variable=self.dry_run).pack(side="left")
         self.natural_mouse = tk.BooleanVar(value=True)
@@ -203,21 +212,27 @@ class BotUI:
 
         self.premove_mode = tk.StringVar(value="off")
         self._row(f, 0, "Premove", ttk.Combobox(f, values=PREMOVE, textvariable=self.premove_mode, state="readonly",
-                                               width=10), "when their reply is 70%+ likely")
+                                               width=10), "when their reply is likely enough")
+        # the two chances share a row to keep the window short
+        self.premove_chance = tk.DoubleVar(value=70)
+        self.low_time_chance = tk.DoubleVar(value=40)
+        chance_box = ttk.Spinbox(f, from_=5, to=100, increment=5, textvariable=self.premove_chance, width=8)
+        low_chance = ttk.Frame(f)
+        low_chance_box = ttk.Spinbox(low_chance, from_=5, to=100, increment=5, textvariable=self.low_time_chance,
+                                     width=4)
+        self._inline(low_chance, "%   low on time", low_chance_box, "%")
+        self._row(f, 1, "Premove at", chance_box)
+        low_chance.grid(row=1, column=2, sticky="w", padx=(6, 0))
         self.premove_streak = tk.IntVar(value=2)
         streak_box = ttk.Spinbox(f, from_=1, to=10, increment=1, textvariable=self.premove_streak, width=8)
-        self._row(f, 1, "Max in a row", streak_box, "then think a move over")
-        # clock and low time share a row to keep the window short
-        self.clock = tk.StringVar(value="")
+        self._row(f, 2, "Max in a row", streak_box, "then think a move over")
         self.low_time = tk.DoubleVar(value=20)
-        low = ttk.Frame(f)
-        self._inline(low, "e.g. 3+2   low under",
-                     ttk.Spinbox(low, from_=5, to=120, increment=5, textvariable=self.low_time, width=4), "s")
-        self._row(f, 2, "Clock", ttk.Entry(f, textvariable=self.clock, width=10))
-        low.grid(row=2, column=2, sticky="w", padx=(6, 0))
-        self.premove_only = [streak_box]   # greyed out while premoves are off
+        self._row(f, 3, "Low on time", ttk.Spinbox(f, from_=5, to=120, increment=5, textvariable=self.low_time,
+                                                  width=8), "seconds left, needs a game mode")
+        self.premove_only = [chance_box, low_chance_box, streak_box]   # greyed out while premoves are off
 
-        for var in (self.premove_mode, self.premove_streak, self.clock, self.low_time):
+        for var in (self.premove_mode, self.premove_chance, self.low_time_chance, self.premove_streak,
+                    self.clock, self.low_time):
             var.trace_add("write", lambda *_: self.apply())
 
     def _inline(self, parent, before, widget, after):
@@ -354,6 +369,8 @@ class BotUI:
             a.human_moves = min(100.0, max(0.0, float(self.human_moves.get())))
             a.low_time = max(1.0, float(self.low_time.get()))
             a.premove_streak = max(1, int(self.premove_streak.get()))
+            a.premove_chance = min(100.0, max(1.0, float(self.premove_chance.get())))
+            a.low_time_chance = min(100.0, max(1.0, float(self.low_time_chance.get())))
         except (tk.TclError, ValueError):
             return                     # a half-typed number: keep the previous value
         human = self.play_as.get() == "human"
@@ -374,17 +391,41 @@ class BotUI:
         if not self.running():
             self.pm_lbl.config(text=PREMOVE_NOTE if a.premove else "off", foreground=WARN if a.premove else MUTED)
         clock = self.clock.get().strip()
-        if not clock or premove.Clock.valid(clock):
-            a.clock = clock or None
+        if clock in ("", "none") or premove.Clock.valid(clock):
+            a.clock = None if clock in ("", "none") else clock
         a.drag = self.move_with.get() == "drag"
         a.dry_run = self.dry_run.get()
         a.side = None if self.side.get() == "auto" else self.side.get()
+
+    def fill_recommended(self):
+        """Put the recommended settings for the chosen game mode in the controls. Only when
+        the mode changed, so tweaks made afterwards stick until another mode is picked."""
+        clock = self.clock.get().strip()
+        if clock == self.filled_for or clock in ("", "none") or not premove.Clock.valid(clock):
+            return
+        self.filled_for = clock
+        r = ap.recommended(clock)
+        self.think.set(r["think"])
+        self.max_think.set(r["max_think"])
+        if self.timing.get() != "off":   # human timing stays on or off as chosen, at the game's pace
+            self.timing.set(r["pace"])
+        if not r["premove"]:
+            self.premove_mode.set("off")
+        elif self.premove_mode.get() == "off":
+            self.premove_mode.set("on")   # "vs engine" stays
+        self.premove_chance.set(r["chance"])
+        self.low_time_chance.set(r["low_chance"])
+        self.low_time.set(r["low_time"])
+        self.premove_streak.set(r["streak"])
+        self.log(f"Game mode {clock}: think {r['think']}s, max {r['max_think']}s, "
+                 f"premove {'on' if r['premove'] else 'off'} at {r['chance']}% ({r['low_chance']}% low on time)")
 
     # ---- running -------------------------------------------------------- #
     def start(self):
         if bc.pyautogui is None:
             self.log("pyautogui is missing: pip install pyautogui")
             return
+        self.fill_recommended()        # a game mode typed in without leaving the box
         self.apply()
         self.stop = threading.Event()
         self.start_btn.config(state="disabled")

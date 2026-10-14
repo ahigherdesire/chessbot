@@ -14,6 +14,7 @@ that `python board_coords.py map` prints (monitor offset included).
 Move the mouse into a screen corner (or press Ctrl+C) to stop.
 """
 import argparse
+import math
 import random
 import sys
 import threading
@@ -56,6 +57,40 @@ PACES = {"bullet": 0.25, "blitz": 0.5, "rapid": 1.0, "classical": 2.0}
 PREMOVE_GRACE = 1.5     # seconds to wait for the site to play our premove once their reply is on screen
 LOW_TIME_THINK = 0.3    # engine seconds per move when low on time
 MOUSE_SPEED = {"bullet": 2.2, "blitz": 1.5, "rapid": 1.15}   # natural mouse: quicker in faster games
+
+# Recommended settings per time control. think: engine seconds; max_think: cap on human timing;
+# pace: human timing pace; premove: worth it at all; chance / low_chance: how likely their
+# reply must be to premove it (normally / when low on time); low_time: seconds that count as low.
+# Faster games premove more readily: a wrong guess there costs less than the time to think.
+TIME_CONTROLS = {
+    "1":     dict(think=0.1, max_think=2,  pace="bullet", premove=True,  chance=45, low_chance=25, low_time=10, streak=4),
+    "1+1":   dict(think=0.2, max_think=3,  pace="bullet", premove=True,  chance=50, low_chance=30, low_time=10, streak=3),
+    "2+1":   dict(think=0.3, max_think=4,  pace="bullet", premove=True,  chance=55, low_chance=30, low_time=15, streak=3),
+    "3":     dict(think=0.4, max_think=6,  pace="blitz",  premove=True,  chance=60, low_chance=35, low_time=20, streak=3),
+    "3+2":   dict(think=0.5, max_think=8,  pace="blitz",  premove=True,  chance=65, low_chance=40, low_time=20, streak=2),
+    "5":     dict(think=0.6, max_think=10, pace="blitz",  premove=True,  chance=65, low_chance=40, low_time=25, streak=2),
+    "10":    dict(think=1.5, max_think=20, pace="rapid",  premove=False, chance=80, low_chance=50, low_time=30, streak=2),
+    "10+5":  dict(think=1.5, max_think=25, pace="rapid",  premove=False, chance=80, low_chance=50, low_time=30, streak=2),
+    "15+10": dict(think=2.0, max_think=30, pace="rapid",  premove=False, chance=85, low_chance=50, low_time=45, streak=1),
+    "30":    dict(think=3.0, max_think=60, pace="classical", premove=False, chance=90, low_chance=60, low_time=60,
+                  streak=1),
+    "30+20": dict(think=4.0, max_think=90, pace="classical", premove=False, chance=90, low_chance=60, low_time=90,
+                  streak=1),
+}
+
+
+def recommended(clock):
+    """Recommended settings for a time control like "3+2" or "5": from TIME_CONTROLS, or for one
+    not listed, from the listed one with the nearest expected game length (lichess's
+    minutes * 60 + 40 * increment)."""
+    if clock in TIME_CONTROLS:
+        return TIME_CONTROLS[clock]
+    def length(spec):
+        base, _, inc = spec.partition("+")
+        return max(1.0, float(base) * 60 + 40 * float(inc or 0))
+    target = length(clock)
+    nearest = min(TIME_CONTROLS, key=lambda spec: abs(math.log(length(spec) / target)))
+    return TIME_CONTROLS[nearest]
 
 
 def think_time(board, top, opp_move=None, prev_eval=None, moves=0, pace=1.0, rng=random, human_top=None):
@@ -540,8 +575,12 @@ def build_parser():
                         "index gives that player (overrides --accuracy and --human-moves)")
     p.add_argument("--max-think", type=float, default=30.0, help="longest human-like think in seconds")
     p.add_argument("--premove", action="store_true",
-                   help="premove when their reply is at least 70%% likely (only move, book opening, clear "
-                        "best or natural move such as a recapture), or 40%% likely when low on time (--clock)")
+                   help="premove when their reply is likely enough (only move, book opening, clear best or "
+                        "natural move such as a recapture): see --premove-chance and --low-time-chance")
+    p.add_argument("--premove-chance", type=float, default=premove.SURE * 100, metavar="PERCENT",
+                   help="premove when their reply is at least this likely (default 70)")
+    p.add_argument("--low-time-chance", type=float, default=premove.LOW_TIME_SURE * 100, metavar="PERCENT",
+                   help="...or this likely when low on time (--clock, default 40)")
     p.add_argument("--opponent-engine", action="store_true",
                    help="the opponent is an engine: judge its reply by how far its best move stands out")
     p.add_argument("--clock", metavar="MIN+INC",
