@@ -101,10 +101,19 @@ python bot_ui.py
 ```
 
 Or double-click `Chess Bot.bat`. A small window opens in the top-right corner
-with the bot's settings: play as an engine or as a human of some rating, accuracy,
+with the bot's settings: the game mode, play as an engine or as a human of some rating, accuracy,
 think time, human timing, max think, the rating for the human index, human moves,
-side, click or drag, natural mouse, premoves, and the clock. Press **Start** and **Stop**
+side, click or drag, natural mouse, and premoves. Press **Start** and **Stop**
 to run the bot. Settings apply from the next move, even while it plays.
+
+Pick the **Game mode** first (1, 1+1, 2+1, 3, 3+2, 5, 10, 10+5, 15+10, 30 or 30+20, or
+type any minutes+increment). It fills in recommended settings:
+think time, max think, the human timing pace (if human timing is on), whether to
+premove, how likely their reply must be to premove it, max premoves in a row, and
+what counts as low on time. Faster games premove more readily: 45% in 1, 65% in
+3+2, 80% in 10 (premoves off from 10 up). Every value stays editable; your
+changes stick until you pick another game mode.
+
 Below the settings it shows:
 
 * an **eval bar** (white/black win chances, your colour at the bottom) with the
@@ -204,8 +213,9 @@ the opponent's most likely reply is:
 * **Otherwise**: the [human index](#human-index), using the **Human index**
   rating. It favours clearly best moves and natural ones such as recaptures.
 
-The bot premoves when the reply is at least **70% likely**. When low on time
-(`--clock`, below `--low-time` seconds, default 20), it premoves at **40%**,
+The bot premoves when the reply is at least **70% likely** (`--premove-chance`,
+or **Premove at** in the control panel). When low on time (`--clock`, below
+`--low-time` seconds, default 20), it premoves at **40%** (`--low-time-chance`),
 because a wrong guess then costs less than thinking, and it thinks at most 0.3s
 a move. It never premoves more than `--premove-streak` moves in a row (default
 2) before thinking a move over again.
@@ -220,6 +230,7 @@ low on time.
 python auto_play.py --premove                       # premove when the reply is clear
 python auto_play.py --premove --opponent-engine     # against another engine
 python auto_play.py --premove --clock 3+2           # also premove more in a time scramble
+python auto_play.py --premove --premove-chance 50   # premove more often (bullet)
 ```
 
 The site plays a premove after **any** reply where it is legal, not only the one
@@ -240,7 +251,8 @@ reply and just plays normally. Premoves that need the promotion picker are
 skipped, unless `--auto-queen` is set.
 
 In the control panel, the **Premoves** section has the mode (*off*, *on* or *vs
-engine*), **Max in a row**, the **Clock** and the low-time limit. The game
+engine*), **Premove at** (the chance needed, normally and when low on time),
+**Max in a row** and the low-time limit. The clock comes from the **Game mode**. The game
 panel shows the premove that is queued or just played, or why the bot decided
 against one. It also shows how many
 premoves landed or were dropped this game, and the bot's estimate of your clock.

@@ -7,8 +7,8 @@ likely reply is:
   * opponent engine (--opponent-engine): how far the engine's best move is ahead of the rest,
   * otherwise: the human index, which favours clearly best moves and natural ones
     such as recaptures.
-It premoves when that reply is at least SURE likely, or LOW_TIME_SURE when low on
-time (--clock), since then a wrong guess costs less than thinking. It also never
+It premoves when that reply is at least --premove-chance likely, or --low-time-chance
+when low on time (--clock), since then a wrong guess costs less than thinking. It also never
 premoves more than --premove-streak times in a row.
 
 The site plays a queued premove after *any* reply where it is legal, not only the
@@ -23,7 +23,7 @@ import chess.engine
 import engine
 import human_index
 
-SURE = 0.7             # premove when their reply is at least this likely...
+SURE = 0.7             # default: premove when their reply is at least this likely...
 LOW_TIME_SURE = 0.4    # ...or this likely when low on time
 ENGINE_SPREAD = 20     # centipawns: an engine picks between moves this close almost at random
 RISK = 80              # our premove may lose at most this much after another reply
@@ -190,7 +190,7 @@ def plan(game, args, low_time=False):
     if guess is None:
         return None, None
     reply, likely, why = guess
-    need = LOW_TIME_SURE if low_time else SURE
+    need = (args.low_time_chance if low_time else args.premove_chance) / 100
     if likely < need:
         # rounded down, so 39.6% never reads as "40%, need 40%"
         return None, f"{game.san(reply)} is only {math.floor(likely * 100)}% likely ({why}), need {need:.0%}"
