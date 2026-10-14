@@ -26,6 +26,8 @@ GRAPH_W, GRAPH_H = 300, 130
 PAD_L, PAD_R, PAD_T, PAD_B = 26, 6, 6, 6   # room around the plot for the axis labels
 GRAPH_MOVES = 20   # the graphs' x axis spans at least this many of our moves
 HOVER_HINT = "Point at a graph to see that move"
+PREMOVE_NOTE = ("On. Premoves are guesses and can fail: the site may drop or ignore one, "
+                "or play it after a reply the bot did not check (see README).")
 
 
 def win_chance(value):
@@ -260,7 +262,7 @@ class BotUI:
         ttk.Label(head, text="Premove", style="Muted.TLabel").pack(side="left")
         self.pm_count = ttk.Label(head, text="", style="Muted.TLabel")
         self.pm_count.pack(side="right")
-        self.pm_lbl = ttk.Label(f, text="off", style="Panel.TLabel", wraplength=300)
+        self.pm_lbl = ttk.Label(f, text="off", style="Panel.TLabel", wraplength=480)
         self.pm_lbl.grid(row=7, column=0, columnspan=2, sticky="w")
         self.white_bottom = True
         self.draw_bar(0.5)
@@ -341,7 +343,7 @@ class BotUI:
         for w in self.premove_only:
             w.state(["!disabled"] if a.premove else ["disabled"])
         if not self.running():
-            self.pm_lbl.config(text="on" if a.premove else "off", foreground=TEXT if a.premove else MUTED)
+            self.pm_lbl.config(text=PREMOVE_NOTE if a.premove else "off", foreground=WARN if a.premove else MUTED)
         clock = self.clock.get().strip()
         if not clock or premove.Clock.valid(clock):
             a.clock = clock or None
@@ -463,7 +465,7 @@ class BotUI:
 
     def show_premove(self, event, text):
         if event == "queued":
-            self.pm_lbl.config(text=f"Queued: {text}", foreground=OK)
+            self.pm_lbl.config(text=f"Queued (may not land): {text}", foreground=OK)
             self.set_status("Premove queued - waiting for the opponent", GOOD)
             return
         if event == "skipped":   # decided against it: show why, but it is not a premove

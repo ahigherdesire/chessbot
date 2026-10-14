@@ -181,6 +181,31 @@ against one. It also shows how many
 premoves landed or were dropped this game, and the bot's estimate of your clock.
 The estimate turns orange when you are low on time.
 
+#### Premoves are not always successful
+
+A queued premove is a guess, and it can fail:
+
+* **Their reply makes it illegal.** The site drops it, and the bot plays
+  normally. It counts as *dropped*.
+* **The site ignores it.** If premoves are turned off in the site's settings,
+  or the site cancels the premove (for example after a misclick or lag), it never
+  plays. The bot waits up to 1.5 seconds after their reply appears, then thinks
+  normally. That wait costs clock time.
+* **They reply first.** Against a fast opponent, the reply can land while the
+  bot is still planning or clicking. A click meant as a premove then becomes a
+  normal move, made for a reply that did not happen. The bot checks the screen
+  just before clicking, so this is rare, but it cannot be ruled out.
+* **It lands after an unexpected reply.** The site plays a premove after any
+  reply where it is legal. The bot only checks the premove against the
+  opponent's 8 best replies (4 when low on time). After any other reply, the
+  premove can be a poor move.
+* **The clock is an estimate.** The low-time limit uses the bot's own count,
+  not the clock on screen. It can be off, so premoves may start a little early
+  or late.
+
+Use premoves when speed matters more than the quality of a few moves, such as
+bullet, a time scramble, or a known opening.
+
 ## Human index
 
 `--human-index [RATING]` prints how likely a human of that rating (default
