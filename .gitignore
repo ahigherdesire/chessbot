@@ -1,2 +1,9 @@
 # engines (Stockfish, lc0) and Maia networks: downloaded, not committed (python get_maia.py)
 engines/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Claude Code notes
+CLAUDE.md
