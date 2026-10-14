@@ -35,7 +35,7 @@ Copy the folder or the zip to any 64-bit Windows PC; Python is not needed there.
 * `engines/`: Stockfish (copied from wherever the bot finds it on this PC), lc0 and
   the Maia networks. Without Stockfish the app uses its built-in engine; without
   lc0 and Maia, human mode uses the fallback model.
-* `templates/`: the piece templates. `calibrate` writes new ones here.
+* `templates/`: the piece sets, one folder each. `calibrate` writes new ones here.
 
 Keep the files together: the programs look for `engines/` and `templates/` next to
 themselves.
@@ -46,7 +46,9 @@ themselves.
   pattern, then fits the grid to the pixel. It works when the board sits inside a
   full-screen screenshot or is cropped a few pixels at the edges.
 * **Pieces**: it separates each piece from its square, decides the colour from
-  brightness, and matches the shape against templates in `templates/default`.
+  brightness, and matches the shape against every piece set in `templates/`,
+  keeping the set that fits best (`default` = chess.com, `lichess` = the classic
+  lichess pieces).
 * **Orientation**: worked out from where the pawns and kings are.
 * **Side to move**: worked out from the yellow last-move highlight. With no
   highlight, it assumes the side at the bottom is to move.
@@ -387,13 +389,19 @@ extremes (11 players over 2400). Ratings are lichess ratings.
 
 ## Other board or piece themes
 
-The bundled templates are for chess.com's default pieces. For another site or
-theme, screenshot the starting position and run:
+Two piece sets are bundled: chess.com's default pieces (`templates/default`) and
+the classic lichess pieces (`templates/lichess`). The board colours don't matter;
+the right set is picked automatically for every screenshot. For another piece set,
+screenshot the starting position and run:
 
 ```
-python chessbot.py calibrate start.png               # white at the bottom
-python chessbot.py calibrate start.png --side black  # black at the bottom
+python chessbot.py calibrate start.png                                  # white at the bottom
+python chessbot.py calibrate start.png --side black                     # black at the bottom
+python chessbot.py calibrate start.png --templates templates/my_pieces  # name the set
 ```
+
+New sets go to `templates/custom` unless you name a folder; every folder in
+`templates/` is used.
 
 ## Strength
 
