@@ -19,7 +19,9 @@ import numpy as np
 FEAT = 64  # every square is normalised to FEAT x FEAT pixels
 SYMBOLS = "PNBRQKpnbrqk"
 HERE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))   # the .exe's folder when built
-DEFAULT_TEMPLATES = os.path.join(HERE, "templates", "default")
+TEMPLATES_DIR = os.path.join(HERE, "templates")              # one sub-folder per piece set
+DEFAULT_TEMPLATES = TEMPLATES_DIR                             # read with every set, keep the best fit
+CUSTOM_TEMPLATES = os.path.join(TEMPLATES_DIR, "custom")      # where calibrate writes by default
 
 
 class BoardNotFound(Exception):
@@ -179,21 +181,30 @@ def _match(feat, tmpl):
 # --------------------------------------------------------------------------- #
 # Templates
 # --------------------------------------------------------------------------- #
-def load_templates(path=DEFAULT_TEMPLATES):
-    meta_path = os.path.join(path, "meta.json")
-    if not os.path.exists(meta_path):
+def load_templates(path=TEMPLATES_DIR):
+    """Load piece sets. `path` is one set (a folder with meta.json) or a folder of sets;
+    returns a list of (name, templates, meta). read_board uses whichever set fits best."""
+    if os.path.exists(os.path.join(path, "meta.json")):
+        return [_load_set(path)]
+    subs = sorted(os.listdir(path)) if os.path.isdir(path) else []
+    sets = [_load_set(os.path.join(path, d)) for d in subs if os.path.exists(os.path.join(path, d, "meta.json"))]
+    if not sets:
         raise FileNotFoundError(f"no templates in {path} - run the 'calibrate' command first")
-    with open(meta_path) as f:
+    return sets
+
+
+def _load_set(path):
+    with open(os.path.join(path, "meta.json")) as f:
         meta = json.load(f)
     tmpls = {}
     for sym in SYMBOLS:
         fn = os.path.join(path, ("w" if sym.isupper() else "b") + sym.upper() + ".png")
         if os.path.exists(fn):
             tmpls[sym] = cv2.imread(fn, cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
-    return tmpls, meta
+    return os.path.basename(os.path.normpath(path)), tmpls, meta
 
 
-def calibrate(img, fen, out_dir=DEFAULT_TEMPLATES, white_bottom=True):
+def calibrate(img, fen, out_dir=CUSTOM_TEMPLATES, white_bottom=True):
     """Learn piece templates from a screenshot whose position (FEN) is known."""
     grid = find_board(img)
     board = chess.Board(fen.split()[0] + " w - - 0 1")
@@ -235,20 +246,12 @@ def _visual_to_square(r, c, white_bottom):
     return chess.square(c, 7 - r) if white_bottom else chess.square(7 - c, r)
 
 
-def read_board(img, templates=None, white_bottom=None, turn=None, grid=None):
-    """Recognise the position in `img` (BGR). Returns a dict with the board and diagnostics.
-    grid: a board already found by find_board (skips the search, much faster)."""
-    tmpls, meta = templates or load_templates()
-    grid = grid or find_board(img)
+def _classify(squares, name, tmpls, meta):
+    """Name the piece on each square with one piece set. Returns (name, visual, conf, fit)."""
     visual = [[None] * 8 for _ in range(8)]
     conf = [[1.0] * 8 for _ in range(8)]
-    highlighted = []
-    for r, c, patch in square_patches(img, grid):
-        bg, sil, feat, wf = analyse_patch(patch)
-        expected = grid["light"] if (r + c) % 2 == 0 else grid["dark"]
-        if np.abs(bg - expected).sum() > 45:
-            highlighted.append((r, c, _yellowness(bg)))
-        if sil.mean() < meta["empty_threshold"]:
+    for r, c, area, feat, wf in squares:
+        if area < meta["empty_threshold"]:
             continue
         is_white = wf > meta["white_threshold"]
         cands = [s for s in tmpls if s.isupper() == is_white] or list(tmpls)
@@ -256,6 +259,25 @@ def read_board(img, templates=None, white_bottom=None, turn=None, grid=None):
         best = max(scores, key=scores.get)
         visual[r][c] = best
         conf[r][c] = scores[best]
+    found = [conf[r][c] for r in range(8) for c in range(8) if visual[r][c]]
+    return name, visual, conf, float(np.mean(found)) if found else 0.0
+
+
+def read_board(img, templates=None, white_bottom=None, turn=None, grid=None):
+    """Recognise the position in `img` (BGR). Returns a dict with the board and diagnostics.
+    grid: a board already found by find_board (skips the search, much faster)."""
+    sets = templates or load_templates()
+    grid = grid or find_board(img)
+    squares = []
+    highlighted = []
+    for r, c, patch in square_patches(img, grid):
+        bg, sil, feat, wf = analyse_patch(patch)
+        expected = grid["light"] if (r + c) % 2 == 0 else grid["dark"]
+        if np.abs(bg - expected).sum() > 45:
+            highlighted.append((r, c, _yellowness(bg)))
+        squares.append((r, c, sil.mean(), feat, wf))
+    # read with every piece set and keep the one whose templates match best
+    piece_set, visual, conf, _ = max((_classify(squares, *s) for s in sets), key=lambda res: res[3])
 
     if white_bottom is None:
         white_bottom = _guess_orientation(visual)
@@ -307,6 +329,7 @@ def read_board(img, templates=None, white_bottom=None, turn=None, grid=None):
         "white_bottom": white_bottom,
         "turn_source": turn_source,
         "last_move": last_move,
+        "piece_set": piece_set,
         "low_confidence": [(r, c, visual[r][c], round(conf[r][c], 2))
                            for r in range(8) for c in range(8) if visual[r][c] and conf[r][c] < 0.6],
     }

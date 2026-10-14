@@ -102,6 +102,7 @@ def cmd_analyze(args):
     board = info["board"]
     print(draw_board(board, info["white_bottom"]))
     print(f"\nFEN:          {board.fen()}")
+    print(f"Piece set:    {info['piece_set']}")
     print(f"Orientation:  {'white' if info['white_bottom'] else 'black'} at the bottom")
     print(f"To move:      {'white' if board.turn else 'black'}  [{info['turn_source']}]")
     if info["low_confidence"]:
@@ -177,7 +178,8 @@ def main():
     c.add_argument("image")
     c.add_argument("--fen", default=chess.STARTING_FEN, help="position shown in the image (default: start)")
     c.add_argument("--side", choices=["white", "black"], default="white", help="colour at the bottom")
-    c.add_argument("--templates", default=br.DEFAULT_TEMPLATES)
+    c.add_argument("--templates", default=br.CUSTOM_TEMPLATES,
+                   help="folder to save the piece set in (default templates/custom)")
     c.set_defaults(func=cmd_calibrate)
 
     args = p.parse_args()
